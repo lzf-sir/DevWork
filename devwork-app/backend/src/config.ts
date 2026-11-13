@@ -6,22 +6,24 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 
 /** devwork-app 根目录。 */
 export const ROOT = path.resolve(here, '../..');
-/** server 根目录。 */
+/** backend 根目录。 */
 export const SERVER_ROOT = path.resolve(here, '..');
+/** 运行时数据根目录：data / sandbox / artifacts 统一收在此，与源码树分离。 */
+export const RUNTIME_DIR = path.join(SERVER_ROOT, '.runtime');
 /* 数据目录与端口可被环境变量覆盖：自动化测试要能起一个用完即弃的实例，
  * 否则回归测试会把 QA 成员 / 测试会话永久写进用户的运行库（审查 P2-15）。 */
 export const DATA_DIR = process.env.DEVWORK_DATA_DIR
   ? path.resolve(process.env.DEVWORK_DATA_DIR)
-  : path.join(SERVER_ROOT, 'data');
+  : path.join(RUNTIME_DIR, 'data');
 /* 沙箱同理：测试会建终端会话、跑 git，这些都不该落在用户的 sandbox 里。 */
 export const SANDBOX_DIR = process.env.DEVWORK_SANDBOX_DIR
   ? path.resolve(process.env.DEVWORK_SANDBOX_DIR)
-  : path.join(SERVER_ROOT, 'sandbox');
+  : path.join(RUNTIME_DIR, 'sandbox');
 export const REPOS_DIR = path.join(SANDBOX_DIR, 'repos');
 export const TERMINAL_DIR = path.join(SANDBOX_DIR, 'terminal');
 export const ARTIFACTS_DIR = process.env.DEVWORK_SANDBOX_DIR
   ? path.join(SANDBOX_DIR, 'artifacts')
-  : path.join(SERVER_ROOT, 'artifacts');
+  : path.join(RUNTIME_DIR, 'artifacts');
 export const DB_PATH = path.join(DATA_DIR, 'devwork.sqlite');
 export const DEMO_DB_PATH = path.join(DATA_DIR, 'demo.sqlite');
 export const SCHEMA_PATH = process.env.DEVWORK_SCHEMA_PATH

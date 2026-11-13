@@ -17,5 +17,5 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "data", "sandbox", "artifacts"]
+  "exclude": ["node_modules", ".runtime"]
 }

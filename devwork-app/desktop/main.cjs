@@ -34,8 +34,10 @@ const IS_PACKAGED = process.defaultApp !== true;
 const APP_ROOT = path.resolve(__dirname, '..');
 /** 打包态的资源根目录（resources/），开发态等于仓库根。 */
 const RES_ROOT = IS_PACKAGED ? process.resourcesPath : APP_ROOT;
-/** 服务端根目录：打包态在 resources/server（暂存产物），开发态在 <repo>/server。 */
-const SERVER_ROOT = IS_PACKAGED ? path.join(RES_ROOT, 'server') : APP_ROOT;
+/** 服务端根目录：打包态在 resources/server（暂存产物），开发态在 <repo>/backend。 */
+const SERVER_ROOT = IS_PACKAGED ? path.join(RES_ROOT, 'server') : path.join(APP_ROOT, 'backend');
+/** 后端运行时数据目录：开发态收在 backend/.runtime，打包态由 DEVWORK_DATA_DIR 指向用户数据目录。 */
+const SERVER_DATA_DIR = IS_PACKAGED ? path.join(SERVER_ROOT, 'data') : path.join(SERVER_ROOT, '.runtime', 'data');
 /** 后端入口：服务端是 TypeScript，靠 tsx 现场跑。 */
 const SERVER_ENTRY = path.join(SERVER_ROOT, 'src', 'index.ts');
 /**
@@ -121,10 +123,10 @@ let tray = null;
  * 空串 = 开发模式（vite 在跑），不做门禁。 */
 let shellToken = '';
 /* 令牌文件路径：与后端 shell-gate.ts 的 SHELL_TOKEN_FILE 保持一致（DATA_DIR/shell-token）。
- * 打包态在用户数据目录，开发态在 <repo>/server/data —— 两个进程认同一枚令牌。 */
+ * 打包态在用户数据目录，开发态在 <repo>/backend/.runtime/data —— 两个进程认同一枚令牌。 */
 const SHELL_TOKEN_FILE = IS_PACKAGED
   ? path.join(resolveUserDataDir(), 'data', 'shell-token')
-  : path.join(SERVER_ROOT, 'data', 'shell-token');
+  : path.join(SERVER_DATA_DIR, 'shell-token');
 
 /**
  * 令牌解析（与后端 ensureShellToken 同优先级）：文件 > 新生成。
@@ -361,10 +363,10 @@ function spawnBackend() {
   return { ok: true, reason: '' };
 }
 
-/* 密文文件跟着服务端走：打包态在 resources/server/data，开发态在 <repo>/server/data。 */
+/* 密文文件跟着服务端走：打包态在用户数据目录，开发态在 <repo>/backend/.runtime/data。 */
 const SECRETS_FILE = IS_PACKAGED
   ? path.join(resolveUserDataDir(), 'data', 'secrets.enc.json')
-  : path.join(SERVER_ROOT, 'data', 'secrets.enc.json');
+  : path.join(SERVER_DATA_DIR, 'secrets.enc.json');
 
 function readSecrets() {
   try { return JSON.parse(fs.readFileSync(SECRETS_FILE, 'utf8')); } catch { return {}; }

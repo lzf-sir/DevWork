@@ -18,6 +18,6 @@
     "noUnusedParameters": false,
     "types": []
   },
-  "include": ["src"],
-  "exclude": ["server", "node_modules", "dist"]
+  "include": ["frontend/src"],
+  "exclude": ["backend", "desktop", "node_modules", "dist"]
 }

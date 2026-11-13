@@ -103,8 +103,8 @@ const electronBin = path.join(
   process.platform === 'win32' ? 'electron.exe' : process.platform === 'darwin' ? 'Electron.app/Contents/MacOS/Electron' : 'electron',
 );
 
-step('启动后端（tsx watch server/src/index.ts）…');
-spawnGuard('[server]', '36', process.execPath, [tsx, 'watch', 'server/src/index.ts'], { DEVWORK_PORT: String(API_PORT) });
+step('启动后端（tsx watch backend/src/index.ts）…');
+spawnGuard('[backend]', '36', process.execPath, [tsx, 'watch', 'backend/src/index.ts'], { DEVWORK_PORT: String(API_PORT) });
 
 step('启动前端（vite）…');
 spawnGuard('[vite]', '32', process.execPath, [viteBin, '--host', '127.0.0.1', '--port', String(VITE_PORT)]);

@@ -21,7 +21,7 @@ execFileSync(
   process.execPath,
   [
     path.join(ROOT, 'node_modules', 'esbuild', 'bin', 'esbuild'),
-    path.join(ROOT, 'src', 'utils', 'composer.ts'),
+    path.join(ROOT, 'frontend', 'src', 'utils', 'composer.ts'),
     '--bundle',
     '--format=esm',
     `--outfile=${BUNDLE}`,

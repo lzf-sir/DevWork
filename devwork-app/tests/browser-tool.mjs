@@ -31,7 +31,7 @@ installAuthFetch(BASE);
 process.env.DEVWORK_DATA_DIR = DATA_DIR;
 process.env.DEVWORK_SANDBOX_DIR = SANDBOX_DIR;
 process.env.DEVWORK_PORT = String(PORT);
-process.env.DEVWORK_SCHEMA_PATH = path.join(ROOT, 'server', 'src', 'db', 'schema.sql');
+process.env.DEVWORK_SCHEMA_PATH = path.join(ROOT, 'backend', 'src', 'db', 'schema.sql');
 
 function bundle(entry, outfile) {
   execFileSync(
@@ -132,7 +132,7 @@ console.log('\n--- D. HTTP 集成 ---');
 {
   const server = spawn(process.execPath, [
     path.join(ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'),
-    path.join(ROOT, 'server', 'src', 'index.ts'),
+    path.join(ROOT, 'backend', 'src', 'index.ts'),
   ], {
     cwd: ROOT,
     env: { ...process.env, DEVWORK_DATA_DIR: DATA_DIR, DEVWORK_SANDBOX_DIR: SANDBOX_DIR, DEVWORK_PORT: String(PORT) },

@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const DATA = path.join(ROOT, 'server', 'data');
+const DATA = path.join(ROOT, 'backend', '.runtime', 'data');
 const DB = path.join(DATA, 'devwork.sqlite');
 const DEMO = path.join(DATA, 'demo.sqlite');
 

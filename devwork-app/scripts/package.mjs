@@ -184,7 +184,7 @@ function stageRuntime() {
   fs.mkdirSync(serverStage, { recursive: true });
 
   /* 服务端源码：src（含 schema.sql 等非 TS 资源）。 */
-  copyDir(path.join(ROOT, 'server', 'src'), path.join(serverStage, 'src'));
+  copyDir(path.join(ROOT, 'backend', 'src'), path.join(serverStage, 'src'));
 
   /* 模块类型声明：服务端是 ESM，打包后这个目录没有上层 package.json 兜底。 */
   fs.writeFileSync(

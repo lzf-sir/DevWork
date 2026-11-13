@@ -20,8 +20,8 @@ const API = `${BASE}/api`;
 
 /* 数据 / 沙箱目录必须跟被测实例一致：隔离实例（npm run test:smoke）会把它们
  * 指到临时目录，测试里所有"落盘校验"才能对着同一个沙箱。 */
-const DATA_DIR = process.env.DEVWORK_DATA_DIR ?? path.join(ROOT, 'server', 'data');
-const SANDBOX_DIR = process.env.DEVWORK_SANDBOX_DIR ?? path.join(ROOT, 'server', 'sandbox');
+const DATA_DIR = process.env.DEVWORK_DATA_DIR ?? path.join(ROOT, 'backend', '.runtime', 'data');
+const SANDBOX_DIR = process.env.DEVWORK_SANDBOX_DIR ?? path.join(ROOT, 'backend', '.runtime', 'sandbox');
 const DEMO_DB = path.join(DATA_DIR, 'demo.sqlite');
 const REPO_ROOT = path.join(SANDBOX_DIR, 'repos', 'order-service');
 const TERMINAL_DIR = path.join(SANDBOX_DIR, 'terminal');

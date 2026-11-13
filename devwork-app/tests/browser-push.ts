@@ -4,9 +4,9 @@
  * 用法：node_modules/.bin/tsx tests/browser-push.ts <conversationId> <url>
  * 与服务进程共享同一个 SQLite 库（WAL 模式支持并发读写）。
  */
-import { initDatabase } from '../server/src/db/database';
-import { deriveToolFace } from '../server/src/config/tool-catalog';
-import { executeAgentTool } from '../server/src/services/agent-tools';
+import { initDatabase } from '../backend/src/db/database';
+import { deriveToolFace } from '../backend/src/config/tool-catalog';
+import { executeAgentTool } from '../backend/src/services/agent-tools';
 
 const conversationId = process.argv[2] ?? 'c-gmv';
 const url = process.argv[3] ?? 'http://127.0.0.1:3001/api/health';

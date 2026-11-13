@@ -119,7 +119,7 @@ async function main() {
 
   const server = spawn(
     process.execPath,
-    [path.join(ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'), path.join(ROOT, 'server', 'src', 'index.ts')],
+    [path.join(ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'), path.join(ROOT, 'backend', 'src', 'index.ts')],
     {
       cwd: ROOT,
       env: {

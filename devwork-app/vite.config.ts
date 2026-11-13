@@ -3,9 +3,11 @@ import react from '@vitejs/plugin-react';
 import pkg from './package.json';
 
 /**
- * Vite 配置：前端 5173，/api 反代到 Express 3001。
+ * Vite 配置：前端在 frontend/，5173 端口，/api 反代到 Express 3001。
+ * 产物仍输出到仓库根 dist/ —— 打包契约（resources/dist）与后端同源托管都依赖它。
  */
 export default defineConfig({
+  root: 'frontend',
   plugins: [react()],
   /* 版本号取自 package.json，前端不再手写一份"当前最新版本"的字符串。 */
   define: {
@@ -32,6 +34,8 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: 'dist',
+    /* 相对 root（frontend/）解析：回到仓库根的 dist/。 */
+    outDir: '../dist',
+    emptyOutDir: true,
   },
 });

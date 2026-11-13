@@ -1,7 +1,7 @@
 /**
  * 数据库浏览能力测试（Navicat 式只读浏览层）。
  *
- * 覆盖 server/src/services/sql-browse.ts 暴露的能力：
+ * 覆盖 backend/src/services/sql-browse.ts 暴露的能力：
  *   - 对象树：表 / 视图 / 索引分类 + 真实行数
  *   - 排序：真实 ORDER BY，方向可切换
  *   - 筛选：真实 WHERE，参数化绑定

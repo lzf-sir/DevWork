@@ -34,7 +34,7 @@ process.env.DEVWORK_SANDBOX_DIR = SANDBOX_DIR;
 process.env.DEVWORK_PORT = String(PORT);
 /* esbuild 打包后 import.meta.url 指向临时 bundle，config.ts 的相对锚点会漂移；
  * schema 路径显式指回源码（与 DATA_DIR 覆盖同一模式）。 */
-process.env.DEVWORK_SCHEMA_PATH = path.join(ROOT, 'server', 'src', 'db', 'schema.sql');
+process.env.DEVWORK_SCHEMA_PATH = path.join(ROOT, 'backend', 'src', 'db', 'schema.sql');
 
 function bundle(entry, outfile) {
   execFileSync(
@@ -64,7 +64,7 @@ const check = (name, ok, detail) => {
 const identity = { name: '测试员', role: 'admin', org: 'DevWork', actor: 'user', source: 'user' };
 const mod = await bundle('tests/agent-tools-entry.ts', path.join(RUN_DIR, 'bundle.mjs'));
 
-/* ================= 初始化（与 server/src/index.ts 非 clean 模式一致） ================= */
+/* ================= 初始化（与 backend/src/index.ts 非 clean 模式一致） ================= */
 mod.initDatabase(mod.seedIfEmpty);
 mod.ensureAgentV9Assets();
 mod.initDemoDatabase();
@@ -276,7 +276,7 @@ console.log('\n--- D. HTTP 集成 ---');
 {
   const server = spawn(
     process.execPath,
-    [path.join(ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'), path.join(ROOT, 'server', 'src', 'index.ts')],
+    [path.join(ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'), path.join(ROOT, 'backend', 'src', 'index.ts')],
     {
       cwd: ROOT,
       env: { ...process.env, DEVWORK_PORT: String(PORT), DEVWORK_DATA_DIR: DATA_DIR, DEVWORK_SANDBOX_DIR: SANDBOX_DIR },

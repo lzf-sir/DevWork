@@ -19,7 +19,7 @@ import {
   specOf,
   visibleFields,
   type FormValues,
-} from '../src/components/assetForms';
+} from '../frontend/src/components/assetForms';
 
 let passed = 0;
 let failed = 0;

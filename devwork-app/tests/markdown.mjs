@@ -21,7 +21,7 @@ execFileSync(
   process.execPath,
   [
     path.join(ROOT, 'node_modules', 'esbuild', 'bin', 'esbuild'),
-    path.join(ROOT, 'src', 'components', 'Markdown.tsx'),
+    path.join(ROOT, 'frontend', 'src', 'components', 'Markdown.tsx'),
     /* --bundle：把 react / jsx-runtime 一起打进来，产物放在系统临时目录也能解析。 */
     '--bundle',
     '--loader:.tsx=tsx',

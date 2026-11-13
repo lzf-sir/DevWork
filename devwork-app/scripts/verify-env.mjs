@@ -9,9 +9,9 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-/** 本文件位于 scripts/，向上两级即 devwork-app 根；server/ 由根拼出。 */
+/** 本文件位于 scripts/，向上两级即 devwork-app 根；backend/ 由根拼出。 */
 const root = path.resolve(here, '..');
-const serverRoot = path.join(root, 'server');
+const serverRoot = path.join(root, 'backend');
 const results = [];
 let failed = false;
 
@@ -83,13 +83,13 @@ const tasklistCandidates = ['C:/Windows/System32/tasklist.exe', 'C:/Windows/syst
 const tasklistFound = tasklistCandidates.some((p) => fs.existsSync(p));
 check('tasklist.exe 存在（Windows ps 分派）', process.platform !== 'win32' || tasklistFound, process.platform === 'win32' ? `found=${tasklistFound}` : '非 Windows 平台，跳过');
 
-for (const dir of ['data', 'sandbox', 'artifacts']) {
+for (const dir of ['.runtime/data', '.runtime/sandbox', '.runtime/artifacts']) {
   const full = path.join(serverRoot, dir);
   try {
     assertWritable(full);
-    check(`目录可写 server/${dir}`, true, full);
+    check(`目录可写 backend/${dir}`, true, full);
   } catch (error) {
-    check(`目录可写 server/${dir}`, false, String(error.message ?? error));
+    check(`目录可写 backend/${dir}`, false, String(error.message ?? error));
   }
 }
 

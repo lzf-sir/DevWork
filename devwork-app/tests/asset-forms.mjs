@@ -3,10 +3,10 @@
  *
  * 覆盖两层防线：
  *
- *   前端（src/components/assetForms.ts）—— 由 server/src/config/asset-forms.ts 的
+ *   前端（src/components/assetForms.ts）—— 由 backend/src/config/asset-forms.ts 的
  *   同一套键名约束：表单按类型生成字段，config 按类型落库。
  *
- *   服务端（server/src/config/asset-forms.ts）—— 白名单清洗：
+ *   服务端（backend/src/config/asset-forms.ts）—— 白名单清洗：
  *     - 未知键丢弃（前端改包也写不进库）
  *     - 敏感键拒绝（token / password / secret 一律不进 config）
  *     - 未知资产类型 fail closed（整份 config 丢弃）
@@ -512,7 +512,7 @@ async function main() {
     fs.mkdirSync(SANDBOX_DIR, { recursive: true });
     server = spawn(
       process.execPath,
-      [path.join(ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'), path.join(ROOT, 'server', 'src', 'index.ts')],
+      [path.join(ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'), path.join(ROOT, 'backend', 'src', 'index.ts')],
       {
         cwd: ROOT,
         env: {

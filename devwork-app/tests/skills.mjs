@@ -1,7 +1,7 @@
 /**
  * 技能登记表一致性校验。
  *
- * 为什么必须测：技能清单在服务端（server/src/config/skills.ts）与前端离线兜底
+ * 为什么必须测：技能清单在服务端（backend/src/config/skills.ts）与前端离线兜底
  * （src/data/mock.ts）各存一份。两份一旦漂移，就会出现「前端菜单里的技能，
  * 服务端没有」或反之 —— 那比没有技能更让人困惑，所以直接让测试拦住。
  *
@@ -35,7 +35,7 @@ function bundle(entry, outfile) {
   return import(pathToFileURL(outfile).href);
 }
 
-const server = await bundle('server/src/config/skills.ts', path.join(OUT_DIR, 'server-skills.mjs'));
+const server = await bundle('backend/src/config/skills.ts', path.join(OUT_DIR, 'server-skills.mjs'));
 const client = await bundle('src/data/mock.ts', path.join(OUT_DIR, 'client-mock.mjs'));
 
 let failed = 0;

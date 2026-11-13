@@ -22,7 +22,7 @@ import { adminCookie } from './lib/session.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BASE = process.env.DEVWORK_BASE ?? 'http://127.0.0.1:3001';
 const API = `${BASE}/api`;
-const SANDBOX_DIR = process.env.DEVWORK_SANDBOX_DIR ?? path.join(ROOT, 'server', 'sandbox');
+const SANDBOX_DIR = process.env.DEVWORK_SANDBOX_DIR ?? path.join(ROOT, 'backend', '.runtime', 'sandbox');
 const WORKSPACES_DIR = path.join(SANDBOX_DIR, 'workspaces');
 
 let passed = 0;

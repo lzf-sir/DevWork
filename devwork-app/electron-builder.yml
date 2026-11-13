@@ -4,12 +4,12 @@ copyright: DevWork local demo
 asar: true
 directories:
   output: release
-  buildResources: electron
-# asar 里只放桌面壳本身（main.cjs / preload.cjs / package.json）。
+  buildResources: desktop
+# asar 里只放桌面壳本身（desktop/main.cjs / desktop/preload.cjs / package.json）。
 # 后端运行时**不进 asar**：它是独立的 Node 进程，读不了 asar 内部的文件，
 # 必须以真实目录形式落在 resources/server 下（由 scripts/package.mjs 暂存）。
 files:
-  - electron/**/*
+  - desktop/**/*
   - package.json
   - '!node_modules/**'
 extraResources:
