@@ -1,0 +1,40 @@
+appId: com.devwork.desktop
+productName: DevWork
+copyright: DevWork local demo
+asar: true
+directories:
+  output: release
+  buildResources: electron
+# asar 里只放桌面壳本身（main.cjs / preload.cjs / package.json）。
+# 后端运行时**不进 asar**：它是独立的 Node 进程，读不了 asar 内部的文件，
+# 必须以真实目录形式落在 resources/server 下（由 scripts/package.mjs 暂存）。
+files:
+  - electron/**/*
+  - package.json
+  - '!node_modules/**'
+extraResources:
+  # 前端构建产物：后端用 Express 同源托管，桌面端直接加载 127.0.0.1:3001。
+  - from: dist
+    to: dist
+  # 服务端运行时（源码 + express/cors/tsx/esbuild），见 scripts/package.mjs 的 stageRuntime()。
+  - from: build/pkg/server
+    to: server
+  # 内置 Node 22 运行时：**这是"免安装也能跑"的前提**。
+  # 后端是独立 Node 进程且依赖 node:sqlite（Node 22.5+ 才有），而 Electron 33
+  # 自带的是 Node 20.x，不带 node:sqlite。目标机没装 Node 就只能看到报错页。
+  # 由 scripts/package.mjs 把当前构建用的 node.exe 暂存到这里。
+  - from: build/pkg/runtime/node.exe
+    to: runtime/node.exe
+win:
+  # 默认目标：portable —— 单文件 exe，免安装，双击即用。
+  # 需要 NSIS 安装包时用 scripts/package.mjs --installer。
+  target: portable
+  # 跳过 rcedit（写 exe 版本信息）与签名：这台机器上杀软会在 exe 落盘后立刻
+  # 打开扫描，rcedit 回写失败（"Unable to commit changes"）会让整次打包挂掉。
+  # 版本信息是装饰性的，程序本身不依赖它；打包脚本会在事后尽力补写。
+  signAndEditExecutable: false
+# 架构不在配置里写：electron-builder 25 的 schema 里 win 下没有 arch 字段，
+# 架构由命令行 --x64 / --arm64 决定（scripts/package.mjs 已带 --win --x64）。
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true

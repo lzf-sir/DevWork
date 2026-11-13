@@ -1,0 +1,16 @@
+# 会话记忆 / 工具数据（运行时产生，不入库）
+.workbuddy/
+
+# 改造前快照备份
+.backup-devwork/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 日志兜底
+*.log

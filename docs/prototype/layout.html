@@ -1,0 +1,1703 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DevWork · 主界面</title>
+<style>
+  :root{
+    --gray-0:#FFFFFF; --gray-25:#FAFAF9; --gray-50:#F6F6F3;
+    --gray-100:#EDEDEA; --gray-200:#E2E1DC; --gray-300:#D3D1C7;
+    --gray-400:#A8A6A0; --gray-600:#6B6A65; --gray-900:#232320;
+    --accent:#2F6FEB; --accent-weak:#EAF1FE; --accent-line:#CFE0FB;
+    --success:#1D9E75; --warning:#BA7517; --warning-bg:#FDF7EA; --warning-line:#F0E2C4;
+    --ctx-bg:#F4F8F5;
+    --ui:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    --mono:"JetBrains Mono","SF Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{font-family:var(--ui);background:var(--gray-0);color:var(--gray-900);
+    font-size:14px;line-height:1.6;display:flex;flex-direction:column;height:100vh;
+    overflow:hidden;-webkit-font-smoothing:antialiased}
+
+  /* ===== 顶栏 ===== */
+  .topbar{height:44px;flex:0 0 44px;display:flex;align-items:center;gap:12px;
+    padding:0 14px;border-bottom:1px solid var(--gray-200);background:var(--gray-25)}
+  .lights{display:flex;gap:6px;margin-right:8px}
+  .lights i{width:10px;height:10px;border-radius:50%;display:block}
+  .lights i:nth-child(1){background:#EE6A5F}
+  .lights i:nth-child(2){background:#F5BD4F}
+  .lights i:nth-child(3){background:#61C554}
+  .wsdrop{display:flex;align-items:center;gap:7px;height:26px;padding:0 10px;
+    border-radius:7px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid transparent}
+  .wsdrop:hover{background:var(--gray-100);border-color:var(--gray-200)}
+  .wsdrop i{width:6px;height:6px;border-radius:50%;background:var(--success);display:block}
+  .chev{width:6px;height:6px;border-right:1.4px solid var(--gray-400);
+    border-bottom:1.4px solid var(--gray-400);transform:rotate(45deg);margin-top:-3px}
+  .grow{flex:1}
+  .kbd{font-family:var(--mono);font-size:11px;color:var(--gray-600);background:#fff;
+    border:1px solid var(--gray-200);border-radius:4px;padding:1px 5px}
+  .ro{display:flex;align-items:center;gap:6px;height:24px;padding:0 9px;border-radius:12px;
+    background:#FBF3E4;color:var(--warning);font-size:11.5px;font-weight:500;
+    border:1px solid var(--warning-line);cursor:pointer}
+  .ro b{width:8px;height:7px;border:1.5px solid var(--warning);border-radius:2px;
+    display:block;position:relative;top:1px}
+
+  /* ===== 主体三栏 ===== */
+  .body{flex:1;display:flex;min-height:0}
+
+  /* 左栏 */
+  .side{width:208px;flex:0 0 208px;background:var(--gray-50);
+    border-right:1px solid var(--gray-200);display:flex;flex-direction:column;min-height:0}
+  .side-scroll{flex:1;overflow-y:auto;padding:10px 8px 8px}
+  .sec-t{font-size:11px;color:var(--gray-400);padding:6px 8px 4px;display:flex;
+    align-items:center;justify-content:space-between}
+  .sec-t .add{width:16px;height:16px;border-radius:4px;display:grid;place-items:center;
+    cursor:pointer;font-size:13px;line-height:1;color:var(--gray-400)}
+  .sec-t .add:hover{background:var(--gray-200);color:var(--gray-900)}
+  .divider{height:1px;background:var(--gray-200);margin:10px 8px 4px}
+  .aitem{display:flex;align-items:center;gap:7px;padding:5px 8px;border-radius:7px;
+    font-size:13px;cursor:pointer;color:var(--gray-900)}
+  .aitem:hover{background:var(--gray-100)}
+  .aitem .ai{width:11px;font-size:9px;color:var(--gray-400);flex:0 0 auto;text-align:center}
+  .aitem .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .aitem .sd{width:5px;height:5px;border-radius:50%;background:var(--success);flex:0 0 auto}
+  .aitem .sd.w{background:var(--warning)}
+  .aitem .sd.nb{width:6px;height:6px;background:transparent;border:1.3px solid var(--gray-400)}
+  .aitem .pct{font-size:10.5px;color:var(--warning);font-variant-numeric:tabular-nums}
+  .aitem .etag{font-size:9.5px;color:var(--gray-600);background:var(--gray-100);
+    border-radius:3px;padding:0 4px}
+  .aitem .lk{width:8px;height:7px;border:1.2px solid var(--gray-400);border-radius:2px;flex:0 0 auto}
+  .folder{display:flex;align-items:center;gap:5px;padding:5px 6px;border-radius:6px;
+    font-size:12.5px;color:var(--gray-600);cursor:pointer;user-select:none}
+  .folder:hover{background:var(--gray-100);color:var(--gray-900)}
+  .folder .cv{width:0;height:0;flex:0 0 auto;margin-right:1px;
+    border-left:4px solid var(--gray-400);border-top:3px solid transparent;
+    border-bottom:3px solid transparent;transition:transform .12s}
+  .folder.open .cv{transform:rotate(90deg)}
+  .folder .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .folder .n{font-size:10.5px;color:var(--gray-400);font-variant-numeric:tabular-nums}
+  .folder .mo{display:none;color:var(--gray-400);font-size:12px;line-height:1}
+  .folder:hover .mo{display:block}
+  .folder:hover .n{display:none}
+  .kids.hide{display:none}
+  .kids .aitem{padding-left:20px}
+  .kids .sitem{padding-left:20px}
+  .aitem.cur{background:var(--accent-weak)}
+  .aitem.cur .t{color:var(--accent);font-weight:500}
+  .aitem.cur .ai{color:var(--accent)}
+  .sitem{display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:7px;
+    font-size:13px;cursor:pointer;color:var(--gray-600)}
+  .sitem:hover{background:var(--gray-100);color:var(--gray-900)}
+  .sitem.on{background:var(--gray-100);color:var(--gray-900)}
+  .sitem .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sitem .more{display:none;color:var(--gray-400);font-size:13px;line-height:1}
+  .sitem:hover .more{display:block}
+  .side-foot{flex:0 0 auto;border-top:1px solid var(--gray-200);padding:8px;
+    background:var(--gray-50)}
+  .ufoot{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;cursor:pointer}
+  .ufoot:hover{background:var(--gray-100)}
+  .ufoot.on{background:var(--accent-weak)}
+  .uava{width:26px;height:26px;border-radius:50%;background:var(--accent-weak);color:var(--accent);
+    display:grid;place-items:center;font-size:11px;font-weight:500;flex:0 0 auto;
+    border:1px solid var(--accent-line)}
+  .ufoot .un{font-size:12.5px;font-weight:500;line-height:1.25}
+  .ufoot .us{font-size:10.5px;color:var(--gray-400)}
+  .sfoot{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;
+    cursor:pointer;color:var(--gray-600);font-size:12.5px;margin-top:2px}
+  .sfoot:hover{background:var(--gray-100);color:var(--gray-900)}
+  .sfoot.on{background:var(--accent-weak);color:var(--accent)}
+  .sfoot .k{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--gray-400)}
+  .usebar{height:6px;border-radius:3px;background:var(--gray-100);overflow:hidden;margin-top:6px}
+  .usebar i{display:block;height:100%;background:var(--accent);border-radius:3px}
+
+  /* 中栏 */
+  .main{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--gray-0)}
+  .view{display:none;flex-direction:column;min-height:0;height:100%}
+  .view.on{display:flex}
+
+  .chead{height:44px;flex:0 0 44px;display:flex;align-items:center;gap:10px;
+    padding:0 20px;border-bottom:1px solid var(--gray-200)}
+  .ctitle{font-size:13px;font-weight:500}
+  .chead .acts{margin-left:auto;display:flex;gap:4px}
+  .ib{width:28px;height:28px;border-radius:6px;display:grid;place-items:center;
+    color:var(--gray-600);cursor:pointer}
+  .ib:hover{background:var(--gray-50);color:var(--gray-900)}
+
+  .thread{flex:1;overflow-y:auto;padding:20px 0 8px}
+  .tin{max-width:780px;margin:0 auto;padding:0 24px}
+
+  .bub{background:var(--accent-weak);border:1px solid var(--accent-line);border-radius:10px;
+    padding:10px 14px;font-size:14px;margin-bottom:16px}
+  .bub .at{color:var(--accent);font-size:13px;display:block;margin-top:3px}
+  .msg{font-size:14px;margin-bottom:12px}
+  .msg p{margin-bottom:8px}
+  .msg p:last-child{margin-bottom:0}
+
+  .toolrow{display:flex;align-items:center;gap:8px;height:34px;padding:0 11px;
+    border:1px solid var(--gray-200);border-radius:8px;font-size:12px;
+    color:var(--gray-600);margin-bottom:10px;cursor:pointer;background:#fff}
+  .toolrow:hover{border-color:var(--gray-300);background:var(--gray-25)}
+  .toolrow .caret2{color:var(--gray-400);font-size:9px}
+  .toolrow .tn{font-family:var(--mono);font-size:11.5px;color:var(--gray-900)}
+  .toolrow .st{color:var(--success);font-size:11.5px}
+  .toolrow .ms{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--gray-400)}
+
+  .appr{display:flex;align-items:center;gap:9px;padding:9px 12px;border-radius:8px;
+    background:var(--warning-bg);border:1px solid var(--warning-line);margin-bottom:14px;font-size:12.5px}
+  .appr .ic{color:var(--warning);flex:0 0 auto}
+  .appr .txt{flex:1;color:var(--gray-900)}
+  .appr .txt code{font-family:var(--mono);font-size:11.5px;background:#fff;
+    border:1px solid var(--warning-line);border-radius:3px;padding:1px 4px}
+  .appr .bs{display:flex;gap:6px;flex:0 0 auto}
+  .btn{font-size:12px;padding:3px 10px;border-radius:6px;border:1px solid var(--gray-200);
+    background:#fff;cursor:pointer;color:var(--gray-900);font-family:inherit;white-space:nowrap}
+  .btn:hover{background:var(--gray-50);border-color:var(--gray-300)}
+  .btn.p{background:var(--accent);border-color:var(--accent);color:#fff}
+  .btn.p:hover{background:#2560d0}
+
+  .concl{border:1px solid var(--gray-200);border-radius:10px;padding:14px 16px;margin-bottom:14px}
+  .concl .ch{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+  .concl .ct{font-size:14px;font-weight:500}
+  .conf{font-size:11px;color:var(--warning);background:#FBF3E4;border:1px solid var(--warning-line);
+    border-radius:4px;padding:1px 6px;margin-left:auto}
+  .concl p{font-size:13.5px;margin-bottom:6px}
+  .concl p:last-child{margin-bottom:0}
+  code{font-family:var(--mono);font-size:12.5px;background:var(--gray-50);
+    border:1px solid var(--gray-200);border-radius:4px;padding:1px 5px}
+  .cite{color:var(--accent);font-size:11px;font-weight:500;vertical-align:super;cursor:pointer}
+  .cite:hover{text-decoration:underline}
+
+  .art{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--gray-200);
+    border-radius:9px;cursor:pointer;background:#fff}
+  .art:hover{border-color:var(--gray-300);background:var(--gray-25)}
+  .art .thumb{width:34px;height:34px;border-radius:6px;background:var(--gray-50);
+    border:1px solid var(--gray-200);display:grid;place-items:center;flex:0 0 auto}
+  .art .an{font-size:12.5px}
+  .art .am{font-size:11px;color:var(--gray-400);margin-top:1px}
+  .art .open{margin-left:auto;font-size:11.5px;color:var(--accent)}
+
+  .composer{flex:0 0 auto;padding:8px 24px 6px}
+  .cbox{max-width:780px;margin:0 auto;border:1px solid var(--gray-300);border-radius:12px;
+    background:#fff;padding:8px 10px 10px}
+  .crow{display:flex;align-items:center;gap:2px;margin-bottom:4px}
+  .chip{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--gray-600);
+    padding:3px 8px;border-radius:6px;cursor:pointer}
+  .chip:hover{background:var(--gray-50);color:var(--gray-900)}
+  .chip b{font-family:var(--mono);font-size:11px;color:var(--gray-400);font-weight:400}
+  .crow .sep{color:var(--gray-300);padding:0 2px}
+  .irow{display:flex;align-items:center;gap:8px;padding:0 4px}
+  .irow .ph{flex:1;color:var(--gray-400);font-size:14px;padding:4px 0}
+  .send{width:28px;height:28px;border-radius:50%;background:var(--accent);border:none;
+    display:grid;place-items:center;cursor:pointer;flex:0 0 auto}
+  .send:hover{background:#2560d0}
+  .meter{text-align:center;font-size:11px;color:var(--gray-400);padding:8px 0 10px}
+
+  /* 右栏 */
+  .ctx{width:300px;flex:0 0 300px;background:var(--ctx-bg);border-left:1px solid var(--gray-200);
+    display:flex;flex-direction:column;min-height:0}
+  .ctx.off{display:none}
+  .ptabs{display:flex;gap:2px;padding:10px 12px 0;border-bottom:1px solid #DDE6DF}
+  .ptab{font-size:12.5px;color:var(--gray-600);padding:6px 10px;cursor:pointer;
+    border-bottom:2px solid transparent;margin-bottom:-1px}
+  .ptab:hover{color:var(--gray-900)}
+  .ptab.on{color:var(--accent);font-weight:500;border-bottom-color:var(--accent)}
+  .pbody{flex:1;overflow-y:auto;padding:12px}
+  .pb{display:none}
+  .pb.on{display:block}
+  .pt{font-size:11px;color:var(--gray-400);margin:4px 0 7px}
+  .achip{border:1px solid #DDE6DF;border-radius:8px;background:#fff;padding:8px 10px;
+    margin-bottom:7px;cursor:pointer}
+  .achip:hover{border-color:var(--gray-300)}
+  .achip .an{font-size:12.5px;font-weight:500}
+  .achip .am{font-size:11px;color:var(--gray-400);margin-top:1px}
+  .hit{border:1px solid #DDE6DF;border-radius:8px;background:#fff;padding:9px 10px;margin-bottom:7px}
+  .hit .hn{font-size:12.5px}
+  .hit .hm{font-size:11px;color:var(--gray-400);margin-top:2px;display:flex;gap:8px}
+  .bars{margin-top:2px}
+  .bars .r{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:11px;color:var(--gray-400)}
+  .bars .r .nm{width:74px;flex:0 0 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .bars .r .b{flex:1;height:6px;border-radius:3px;background:#E3EDE6;overflow:hidden}
+  .bars .r .b i{display:block;height:100%;background:var(--success);border-radius:3px}
+  .bars .r .v{width:34px;text-align:right;font-variant-numeric:tabular-nums}
+  .frow{display:flex;align-items:center;gap:8px;padding:8px 9px;border:1px solid #DDE6DF;
+    border-radius:8px;background:#fff;margin-bottom:7px;cursor:pointer}
+  .frow:hover{border-color:var(--gray-300)}
+  .frow .fi{width:22px;height:22px;border-radius:5px;display:grid;place-items:center;
+    font-size:10px;font-family:var(--mono);flex:0 0 auto}
+  .frow .fn{font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  /* ===== 资产中心 ===== */
+  .pgsub{font-size:12.5px;color:var(--gray-400);margin-top:3px}
+  .fchip{font-size:12px;padding:3px 11px;border-radius:14px;border:1px solid var(--gray-200);
+    color:var(--gray-600);cursor:pointer;background:#fff}
+  .fchip:hover{border-color:var(--gray-300);color:var(--gray-900)}
+  .fchip.on{background:var(--gray-900);border-color:var(--gray-900);color:#fff}
+  .fchip .n{opacity:.6;margin-left:4px;font-variant-numeric:tabular-nums}
+  .atag{font-size:10px;font-weight:400;color:var(--gray-600);background:var(--gray-100);
+    border-radius:3px;padding:1px 5px}
+  .alock{width:9px;height:8px;border:1.3px solid var(--gray-400);border-radius:2px;
+    display:inline-block;position:relative;top:1px}
+  .sdot{width:6px;height:6px;border-radius:50%;background:var(--success);flex:0 0 auto;display:inline-block}
+  .sdot.w{background:var(--warning)}
+  .amore{width:26px;height:26px;border-radius:6px;display:grid;place-items:center;
+    color:var(--gray-400);cursor:pointer;flex:0 0 auto}
+  .amore:hover{background:var(--gray-100);color:var(--gray-900)}
+
+  /* 状态栏 */
+  .sbar{height:30px;flex:0 0 30px;background:var(--gray-50);border-top:1px solid var(--gray-200);
+    display:flex;align-items:center;gap:16px;padding:0 14px;font-size:11px;color:var(--gray-600)}
+  .sbar .r{margin-left:auto;display:flex;gap:16px;align-items:center}
+  .sbar .dotok{width:5px;height:5px;border-radius:50%;background:var(--success);
+    display:inline-block;margin-right:5px}
+
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-thumb{background:var(--gray-200);border-radius:5px;
+    border:2px solid transparent;background-clip:padding-box}
+  ::-webkit-scrollbar-thumb:hover{background:var(--gray-300);background-clip:padding-box}
+  /* ===== 资产详情 · 通用骨架 ===== */
+  .dhead{height:52px;flex:0 0 52px;display:flex;align-items:center;gap:10px;
+    padding:0 20px;border-bottom:1px solid var(--gray-200)}
+  .back{width:26px;height:26px;border-radius:6px;display:grid;place-items:center;
+    cursor:pointer;color:var(--gray-600)}
+  .back:hover{background:var(--gray-50)}
+  .dicon{width:28px;height:28px;border-radius:7px;background:var(--gray-50);
+    border:1px solid var(--gray-200);display:grid;place-items:center;
+    font-family:var(--mono);font-size:12px;color:var(--gray-600)}
+  .dname{font-size:14px;font-weight:500}
+  .dsub{font-size:11px;color:var(--gray-400);font-family:var(--mono);margin-top:1px}
+  .pill{display:flex;align-items:center;gap:5px;font-size:11px;padding:2px 8px;
+    border-radius:10px;border:1px solid var(--gray-200);color:var(--gray-600)}
+  .pill.ok{color:var(--success);border-color:#CDE9DE;background:#F1FAF6}
+  .pill.ro{color:var(--warning);border-color:#F0DFC0;background:#FBF3E4}
+  .dacts{margin-left:auto;display:flex;align-items:center;gap:6px}
+  .dtabs{height:40px;flex:0 0 40px;display:flex;align-items:center;gap:2px;
+    padding:0 20px;border-bottom:1px solid var(--gray-200)}
+  .dtab{font-size:13px;color:var(--gray-600);padding:9px 10px;cursor:pointer;
+    border-bottom:2px solid transparent;margin-bottom:-1px}
+  .dtab:hover{color:var(--gray-900)}
+  .dtab.on{color:var(--gray-900);font-weight:500;border-bottom-color:var(--gray-900)}
+  .dbody{flex:1;min-height:0;display:none;flex-direction:column;overflow:hidden}
+  .dbody.on{display:flex}
+
+  /* 概览 */
+  .ov{padding:20px 24px;overflow-y:auto;flex:1}
+  .ov-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  .mcard{border:1px solid var(--gray-200);border-radius:9px;padding:11px 13px}
+  .mcard .k{font-size:11px;color:var(--gray-400)}
+  .mcard .v{font-size:18px;font-weight:500;margin-top:3px;font-variant-numeric:tabular-nums}
+  .mcard .v s{font-size:11px;color:var(--gray-400);font-weight:400;margin-left:3px;text-decoration:none}
+  .sect-t{font-size:12px;font-weight:500;color:var(--gray-600);margin:20px 0 8px}
+  .kv{border:1px solid var(--gray-200);border-radius:9px;overflow:hidden}
+  .kv .kr{display:flex;padding:9px 14px;font-size:12.5px;border-bottom:1px solid var(--gray-100)}
+  .kv .kr:last-child{border-bottom:none}
+  .kv .kk{width:100px;color:var(--gray-400);flex:0 0 auto}
+  .kv .vv{font-family:var(--mono);font-size:11.5px;flex:1;word-break:break-all}
+
+  /* 通用提示条 */
+  .banner{display:flex;align-items:center;gap:7px;padding:7px 14px;font-size:12px;
+    color:var(--warning);background:#FBF7EC;border-bottom:1px solid #F0E4C8;flex:0 0 auto}
+
+  /* 能力授权 */
+  .caps{padding:16px 24px;overflow-y:auto;flex:1}
+  .cap{display:flex;align-items:center;gap:12px;padding:12px 14px;
+    border:1px solid var(--gray-200);border-radius:9px;margin-bottom:8px}
+  .cap .ci{flex:1;min-width:0}
+  .cap .cn{font-size:13px;font-weight:500}
+  .cap .cd{font-size:11.5px;color:var(--gray-400);margin-top:2px}
+  .sw{width:32px;height:18px;border-radius:9px;background:var(--success);position:relative;flex:0 0 auto;cursor:pointer}
+  .sw::after{content:"";position:absolute;top:2px;right:2px;width:14px;height:14px;
+    border-radius:50%;background:#fff}
+  .sw.off{background:var(--gray-200)}
+  .sw.off::after{left:2px;right:auto}
+  .cap.lock{background:var(--gray-25)}
+  .cap.lock .cn{color:var(--gray-400)}
+
+  /* 终端 */
+  .term{flex:1;background:#1B1B19;color:#D8D6CE;font-family:var(--mono);font-size:12.5px;
+    line-height:1.75;padding:12px 14px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
+  .term .pr{color:#7FB3FF}
+  .term .dm{color:#8A8880}
+  .term .er{color:#F09595}
+  .term .ok{color:#8FD6B4}
+  .term .cur{display:inline-block;width:7px;height:15px;background:#D8D6CE;
+    vertical-align:-2px;animation:bl 1.1s steps(2) infinite}
+  @keyframes bl{50%{opacity:0}}
+  .termbar{height:28px;flex:0 0 28px;display:flex;align-items:center;gap:16px;padding:0 14px;
+    font-size:11px;color:var(--gray-400);border-top:1px solid var(--gray-200);background:var(--gray-25)}
+  .termbar .sr{margin-left:auto;display:flex;gap:14px}
+
+  /* 分栏 */
+  .split{flex:1;display:flex;min-height:0}
+  .tlist{width:196px;flex:0 0 196px;border-right:1px solid var(--gray-200);overflow-y:auto;padding:8px 0}
+  .tnode{display:flex;align-items:center;gap:6px;padding:4px 12px;font-size:12.5px;
+    color:var(--gray-600);cursor:pointer}
+  .tnode:hover{background:var(--gray-50);color:var(--gray-900)}
+  .tnode.on{background:var(--accent-weak);color:var(--accent)}
+  .tnode .ic{width:11px;font-size:9px;color:var(--gray-400)}
+  .tnode .cn2{margin-left:auto;font-size:10.5px;color:var(--gray-400);font-variant-numeric:tabular-nums}
+  .tgrp{font-size:11px;color:var(--gray-400);padding:8px 12px 4px}
+
+  /* SQL */
+  .sqltools{display:flex;align-items:center;gap:6px;padding:6px 12px;
+    border-bottom:1px solid var(--gray-100);flex:0 0 auto}
+  .sqlbody{flex:0 0 auto;height:132px;padding:8px 14px;font-family:var(--mono);
+    font-size:12.5px;line-height:1.75;overflow:auto;white-space:pre;background:var(--gray-0)}
+  .sqlbody .ln{color:var(--gray-400);user-select:none}
+  .kw2{color:#8B5CF6;font-weight:500}
+  .str2{color:#0F7B6C}
+  .cmt{color:var(--gray-400)}
+  .grid{flex:1;overflow:auto}
+  table.g{border-collapse:collapse;font-size:12px;width:100%;font-family:var(--mono)}
+  table.g th{position:sticky;top:0;background:var(--gray-25);text-align:left;font-weight:500;
+    color:var(--gray-600);padding:7px 12px;border-bottom:1px solid var(--gray-200);
+    border-right:1px solid var(--gray-100);white-space:nowrap;font-family:var(--ui);font-size:11.5px}
+  table.g td{padding:6px 12px;border-bottom:1px solid var(--gray-100);
+    border-right:1px solid var(--gray-100);white-space:nowrap;color:var(--gray-900)}
+  table.g td.n{text-align:right;font-variant-numeric:tabular-nums}
+  table.g tr:hover td{background:var(--gray-25)}
+  .nul{color:var(--gray-400)}
+  .tagc{font-size:10.5px;padding:1px 6px;border-radius:3px;background:#FBF3E4;color:var(--warning)}
+  .dbar2{height:28px;flex:0 0 28px;display:flex;align-items:center;gap:16px;padding:0 14px;
+    font-size:11px;color:var(--gray-400);border-top:1px solid var(--gray-200);background:var(--gray-25)}
+  .dbar2 .sr{margin-left:auto;display:flex;gap:14px}
+
+  /* 编辑器 */
+  .ftree{width:232px;flex:0 0 232px;border-right:1px solid var(--gray-200);overflow-y:auto;padding:8px 0}
+  .fnode{display:flex;align-items:center;gap:6px;padding:4px 10px;font-size:12.5px;
+    color:var(--gray-600);cursor:pointer;white-space:nowrap}
+  .fnode:hover{background:var(--gray-50)}
+  .fnode.on{background:var(--accent-weak);color:var(--accent)}
+  .fnode .ic{width:11px;font-size:9px;color:var(--gray-400);flex:0 0 auto}
+  .fnode .md{margin-left:auto;width:5px;height:5px;border-radius:50%;background:var(--warning);flex:0 0 auto}
+  .editor{flex:1;display:flex;flex-direction:column;min-width:0}
+  .ebar{height:32px;flex:0 0 32px;display:flex;align-items:center;gap:8px;padding:0 12px;
+    border-bottom:1px solid var(--gray-100);font-size:12px;color:var(--gray-600)}
+  .ebar .fn{font-family:var(--mono);font-size:11.5px}
+  .moddot{width:6px;height:6px;border-radius:50%;background:var(--warning)}
+  .codewrap{flex:1;display:flex;overflow:auto;font-family:var(--mono);font-size:12.5px;line-height:1.75}
+  .gutter{padding:8px 10px;text-align:right;color:var(--gray-400);user-select:none;
+    background:var(--gray-25);border-right:1px solid var(--gray-100);flex:0 0 auto;white-space:pre}
+  .codebody{padding:8px 14px;white-space:pre;flex:1;line-height:1.75}
+  .kw3{color:#8B5CF6}
+  .ty3{color:#0F7B6C}
+  .str3{color:#B45309}
+  .cm3{color:#7C8B5A}
+  .mod{background:#FBF3E4;border-radius:2px}
+  .rinfo{width:212px;flex:0 0 212px;border-left:1px solid var(--gray-200);overflow-y:auto;padding:10px 12px}
+  .rinfo .rt{font-size:11px;color:var(--gray-400);margin-bottom:6px}
+  .sym{font-size:12px;color:var(--gray-600);padding:3px 0;display:flex;gap:6px;cursor:pointer}
+  .sym:hover{color:var(--accent)}
+  .sym .sg{color:var(--accent);font-family:var(--mono);font-size:10.5px}
+
+  /* ===== 项目概览 ===== */
+  .pjg{padding:20px 24px;overflow-y:auto;flex:1}
+  .pj-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(236px,1fr));gap:12px}
+  .pjcard{border:1px solid var(--gray-200);border-radius:10px;padding:14px;cursor:pointer;
+    background:#fff;display:flex;flex-direction:column}
+  .pjcard:hover{border-color:var(--gray-300);background:var(--gray-25)}
+  .pjcard.cur{border-color:var(--accent-line);background:var(--accent-weak)}
+  .pjname{font-size:14px;font-weight:500;display:flex;align-items:center;gap:7px}
+  .pjdesc{font-size:12px;color:var(--gray-400);margin-top:4px;line-height:1.55;flex:1}
+  .pjbar{height:4px;border-radius:2px;background:var(--gray-100);margin-top:12px;overflow:hidden}
+  .pjbar i{display:block;height:100%;background:var(--success);border-radius:2px}
+  .pjmeta{display:flex;gap:12px;font-size:11px;color:var(--gray-400);margin-top:8px;flex-wrap:wrap}
+  .pjnew{border:1px dashed var(--gray-300);border-radius:10px;display:grid;place-items:center;
+    min-height:136px;cursor:pointer;color:var(--gray-400);font-size:13px;background:transparent}
+  .pjnew:hover{border-color:var(--accent);color:var(--accent)}
+
+  /* ===== 设置 ===== */
+  .set{flex:1;display:flex;min-height:0}
+  .setnav{width:172px;flex:0 0 172px;border-right:1px solid var(--gray-200);
+    padding:12px 8px;background:var(--gray-25)}
+  .setnav .si{font-size:12.5px;color:var(--gray-600);padding:6px 10px;border-radius:6px;cursor:pointer}
+  .setnav .si:hover{background:var(--gray-100);color:var(--gray-900)}
+  .setnav .si.on{background:var(--accent-weak);color:var(--accent);font-weight:500}
+  .setbody{flex:1;overflow-y:auto;padding:18px 24px 28px}
+  .setsec{display:none}
+  .setsec.on{display:block}
+  .stitle{font-size:15px;font-weight:500}
+  .sdesc{font-size:12px;color:var(--gray-400);margin:3px 0 14px}
+  .srow{display:flex;align-items:flex-start;gap:16px;padding:12px 0;
+    border-bottom:1px solid var(--gray-100)}
+  .srow:last-child{border-bottom:none}
+  .sl{flex:1;min-width:0}
+  .sn{font-size:13px}
+  .sd2{font-size:11.5px;color:var(--gray-400);margin-top:2px;line-height:1.5}
+  .sc{flex:0 0 auto;display:flex;align-items:center;gap:8px;padding-top:1px}
+  .sel{border:1px solid var(--gray-200);border-radius:6px;padding:4px 8px;font-size:12px;
+    background:#fff;cursor:pointer;font-family:inherit;color:var(--gray-900);min-width:118px}
+  .sinput{border:1px solid var(--gray-200);border-radius:6px;padding:5px 9px;font-size:12px;
+    width:186px;background:#fff;font-family:var(--mono);color:var(--gray-900)}
+  .toggle{width:34px;height:19px;border-radius:10px;background:var(--success);
+    position:relative;cursor:pointer;flex:0 0 auto;border:none}
+  .toggle::after{content:"";position:absolute;top:2px;right:2px;width:15px;height:15px;
+    border-radius:50%;background:#fff}
+  .toggle.off{background:var(--gray-200)}
+  .toggle.off::after{left:2px;right:auto}
+  .danger{color:var(--danger);border-color:#F2D4D4}
+  .danger:hover{background:#FDF5F5;border-color:var(--danger)}
+  /* ===== 组织管理 ===== */
+  .mbar{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+  .mstat{font-size:12px;color:var(--gray-400)}
+  .mbar .btn:first-of-type{margin-left:auto}
+  .mtable{border:1px solid var(--gray-200);border-radius:9px;overflow:hidden;background:#fff}
+  .mth{display:flex;gap:12px;padding:8px 12px;background:var(--gray-25);
+    font-size:11px;color:var(--gray-400);border-bottom:1px solid var(--gray-200)}
+  .mrow{display:flex;gap:12px;align-items:center;padding:9px 12px;font-size:12.5px;
+    border-bottom:1px solid var(--gray-100)}
+  .mrow:last-child{border-bottom:none}
+  .mrow:hover{background:var(--gray-25)}
+  .c1{flex:1.5;min-width:0;display:flex;align-items:center;gap:8px}
+  .c1 .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .c2{flex:1.7;min-width:0;color:var(--gray-400);font-size:11.5px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .c3{width:86px;flex:0 0 auto}
+  .c4{width:64px;flex:0 0 auto}
+  .c5{width:78px;flex:0 0 auto;color:var(--gray-400);font-size:11px}
+  .c6{width:28px;flex:0 0 auto;text-align:right;color:var(--gray-400);cursor:pointer}
+  .mav{width:24px;height:24px;border-radius:50%;background:var(--gray-100);color:var(--gray-600);
+    display:grid;place-items:center;font-size:10.5px;flex:0 0 auto}
+  .role{font-size:11px;padding:1px 7px;border-radius:10px;border:1px solid var(--gray-200);
+    color:var(--gray-600);white-space:nowrap}
+  .role.adm{color:var(--accent);border-color:var(--accent-line);background:var(--accent-weak)}
+  .role.gst{color:var(--gray-400);border-style:dashed}
+  .stt{font-size:11.5px;color:var(--success)}
+  .stt.pending{color:var(--warning)}
+  .stt.off{color:var(--gray-400)}
+  .ptable{width:100%;border-collapse:collapse;font-size:12.5px;
+    border:1px solid var(--gray-200);border-radius:9px;overflow:hidden}
+  .ptable th{font-size:11px;font-weight:400;color:var(--gray-400);text-align:left;
+    padding:8px 12px;background:var(--gray-25);border-bottom:1px solid var(--gray-200)}
+  .ptable td{padding:9px 12px;border-bottom:1px solid var(--gray-100);font-size:12.5px}
+  .ptable tr:last-child td{border-bottom:none}
+  .ptable td.y{color:var(--success);font-size:13px}
+  .ptable td.n{color:var(--gray-300)}
+  .ptable td.mut{color:var(--gray-400);font-size:11.5px}
+  .impact{font-size:11.5px;color:var(--warning);margin-top:4px}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="lights"><i></i><i></i><i></i></div>
+  <div class="wsdrop" id="to-projects" title="切换项目"><i></i><span id="wsname">生产运维</span><span class="chev"></span></div>
+  <div class="grow"></div>
+  <div class="ro"><b></b>只读模式</div>
+  <span class="kbd">⌘K</span>
+</div>
+
+<div class="body">
+
+  <aside class="side">
+    <div class="side-scroll">
+      <div class="sec-t">资产中心 <span class="add" title="添加资产 / 新建文件夹">＋</span></div>
+
+      <div class="folder open">
+        <span class="cv"></span><span class="t">订单系统</span><span class="n">4</span><span class="mo">⋯</span>
+      </div>
+      <div class="kids">
+        <div class="aitem" data-go="code"><span class="ai">▣</span><span class="t">order-service</span><span class="sd"></span></div>
+        <div class="aitem" data-go="code"><span class="ai">▣</span><span class="t">inventory-client</span><span class="sd"></span></div>
+        <div class="aitem" data-go="code"><span class="ai">▣</span><span class="t">common-lib</span><span class="pct">62%</span></div>
+        <div class="aitem" data-go="db"><span class="ai">▤</span><span class="t">order_db</span><span class="etag">dev</span><span class="sd"></span></div>
+      </div>
+
+      <div class="folder">
+        <span class="cv"></span><span class="t">生产环境</span><span class="n">2</span><span class="mo">⋯</span>
+      </div>
+      <div class="kids hide">
+        <div class="aitem" data-go="db" title="配置已共享 · 你还没绑定凭据"><span class="ai">▤</span><span class="t">order_db</span><span class="etag">prod</span><span class="sd nb"></span></div>
+        <div class="aitem" data-go="server"><span class="ai">▥</span><span class="t">order-api-01</span><span class="etag">prod</span><span class="sd"></span></div>
+      </div>
+
+      <div class="aitem"><span class="ai">▧</span><span class="t">运营知识库</span><span class="sd"></span></div>
+
+      <div class="divider"></div>
+
+      <div class="sec-t">会话 <span class="add" title="新建会话 / 新建文件夹">＋</span></div>
+
+      <div class="folder open">
+        <span class="cv"></span><span class="t">故障排查</span><span class="n">3</span><span class="mo">⋯</span>
+      </div>
+      <div class="kids">
+        <div class="sitem on"><span class="t">慢查询排查</span><span class="more">⋯</span></div>
+        <div class="sitem"><span class="t">磁盘告警复盘</span><span class="more">⋯</span></div>
+        <div class="sitem"><span class="t">连接池耗尽</span><span class="more">⋯</span></div>
+      </div>
+
+      <div class="folder">
+        <span class="cv"></span><span class="t">季度汇报</span><span class="n">1</span><span class="mo">⋯</span>
+      </div>
+      <div class="kids hide">
+        <div class="sitem"><span class="t">季度方案文档</span><span class="more">⋯</span></div>
+      </div>
+
+      <div class="sitem"><span class="t">GMV 归因</span><span class="more">⋯</span></div>
+    </div>
+
+    <div class="side-foot">
+      <div class="ufoot" id="to-user">
+        <div class="uava">黎</div>
+        <div style="flex:1;min-width:0">
+          <div class="un">黎忠芳</div>
+          <div class="us">订单中台 · 管理员</div>
+        </div>
+      </div>
+      <div class="sfoot" id="to-settings">
+        <svg width="14" height="14" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="2.6" stroke="currentColor" stroke-width="1.5"/><path d="M10 2.5v2.2M10 15.3v2.2M2.5 10h2.2M15.3 10h2.2M4.6 4.6l1.6 1.6M13.8 13.8l1.6 1.6M15.4 4.6l-1.6 1.6M6.2 13.8l-1.6 1.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        系统设置
+        <span class="k">⌘,</span>
+      </div>
+    </div>
+  </aside>
+
+  <div class="main">
+
+    <!-- 会话 -->
+    <div class="view on" data-view="chat">
+      <div class="chead">
+        <div class="ctitle">GMV 归因</div>
+        <div class="acts">
+          <div class="ib" title="导出">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 2v8M5 7l3 3 3-3M3 13h10" stroke="#6B6A65" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </div>
+          <div class="ib">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="3" cy="8" r="1.2" fill="#6B6A65"/><circle cx="8" cy="8" r="1.2" fill="#6B6A65"/><circle cx="13" cy="8" r="1.2" fill="#6B6A65"/></svg>
+          </div>
+        </div>
+      </div>
+
+      <div class="thread">
+        <div class="tin">
+          <div class="bub">上月 GMV 为什么跌了？
+            <span class="at">@ 生产库　@ 运营知识库</span>
+          </div>
+
+          <div class="msg"><p>先看 orders 表结构和口径，再决定按哪个维度拆。</p></div>
+
+          <div class="toolrow">
+            <span class="caret2">▶</span>
+            <span class="tn">pg_sql_query</span>
+            <span class="st">已自动放行</span>
+            <span class="ms">1.8s</span>
+          </div>
+
+          <div class="appr">
+            <svg class="ic" width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M8 2l6 11H2L8 2z" stroke="#BA7517" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 6.5v3" stroke="#BA7517" stroke-width="1.3" stroke-linecap="round"/></svg>
+            <span class="txt">待审批：<code>truncate</code> 大日志文件 <span style="color:var(--gray-400);font-size:11.5px">（Agent 发起 · 只读模式下不可执行）</span></span>
+            <span class="bs"><button class="btn">拒绝</button><button class="btn">查看命令</button></span>
+          </div>
+
+          <div class="concl">
+            <div class="ch"><span class="ct">结论</span><span class="conf">置信度 0.82</span></div>
+            <p>口径变更导致 GMV 下降 <strong>-12%</strong>，另有 <strong>3%</strong> 为退款冲减<span class="cite">[1]</span><span class="cite">[2]</span>。</p>
+            <p style="font-size:12.5px;color:var(--gray-600)">若不调整口径，同口径下实际同比 +1.4%，未出现真实下滑。</p>
+          </div>
+
+          <div class="art">
+            <div class="thumb">
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="10" rx="1.5" stroke="#6B6A65" stroke-width="1.3"/><path d="M2 11l3.5-3.5L8 10l2-2 4 4" stroke="#6B6A65" stroke-width="1.3" stroke-linejoin="round"/></svg>
+            </div>
+            <div>
+              <div class="an">GMV 趋势图</div>
+              <div class="am">gmv_trend.png · 1280×720</div>
+            </div>
+            <span class="open">展开产物</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="composer">
+        <div class="cbox">
+          <div class="crow">
+            <div class="chip"><b>@</b> 引用资产</div>
+            <span class="sep">/</span>
+            <div class="chip">命令</div>
+            <div class="chip">附件</div>
+          </div>
+          <div class="irow">
+            <div class="ph">输入你的问题…</div>
+            <button class="send">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 12V4M4.5 7.5L8 4l3.5 3.5" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="meter">上下文 32k / 200k · 本会话 ¥0.42</div>
+      </div>
+    </div>
+
+    <div class="view" data-view="detail-server">
+      <div class="dhead">
+        <div class="back" title="返回会话">←</div>
+        <div class="dicon">▥</div>
+        <div>
+          <div class="dname">order-api-01</div>
+          <div class="dsub">SSH · deploy@10.20.1.31 · /opt/app</div>
+        </div>
+        <div class="pill ok"><span class="sdot"></span>在线</div>
+        <div class="pill ro">只读</div>
+        <div class="dacts">
+          <button class="btn">在会话中排查</button>
+          <button class="btn p">新建终端</button>
+          <div class="amore">⋯</div>
+        </div>
+      </div>
+      <div class="dtabs">
+        <div class="dtab on" data-dt="ov">概览</div>
+        <div class="dtab" data-dt="main">终端</div>
+        <div class="dtab" data-dt="cap">能力授权</div>
+      </div>
+
+      <div class="dbody on" data-dt="ov">
+        <div class="ov">
+          <div class="ov-grid">
+            <div class="mcard"><div class="k">CPU</div><div class="v">23<s>%</s></div></div>
+            <div class="mcard"><div class="k">内存</div><div class="v">4.2<s>/ 8 GB</s></div></div>
+            <div class="mcard"><div class="k">磁盘</div><div class="v">62<s>%</s></div></div>
+            <div class="mcard"><div class="k">运行时长</div><div class="v">3<s>天 4 时</s></div></div>
+          </div>
+
+          <div class="sect-t">连接</div>
+          <div class="kv">
+            <div class="kr"><div class="kk">主机</div><div class="vv">10.20.1.31</div></div>
+            <div class="kr"><div class="kk">登录用户</div><div class="vv">deploy（密钥认证，无 sudo）</div></div>
+            <div class="kr"><div class="kk">系统</div><div class="vv">Ubuntu 22.04 LTS · 时区 Asia/Shanghai</div></div>
+            <div class="kr"><div class="kk">工作目录</div><div class="vv">/opt/app</div></div>
+            <div class="kr"><div class="kk">运行容器</div><div class="vv">order-api:1.8.2 · redis:7.2 · nginx:1.25</div></div>
+          </div>
+
+          <div class="sect-t">最近活动</div>
+          <div class="kv">
+            <div class="kr"><div class="kk">2 分钟前</div><div class="vv">查看 docker ps（你）</div></div>
+            <div class="kr"><div class="kk">1 小时前</div><div class="vv">tail error.log（Agent · 会话「排查 QPS 下降」）</div></div>
+            <div class="kr"><div class="kk">昨天</div><div class="vv">journalctl -u order-api -n 200（你）</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="dbody" data-dt="main">
+        <div class="banner">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><rect x="4" y="7" width="8" height="6" rx="1.5" stroke="#BA7517" stroke-width="1.3"/><path d="M6 7V5a2 2 0 014 0v2" stroke="#BA7517" stroke-width="1.3"/></svg>
+          只读模式：仅放行 42 条只读命令白名单，其余命令在本地拦截、不发送到远端
+        </div>
+        <div class="term"><span class="dm"># 会话 1 · deploy@order-api-01 · 已连接 23ms</span>
+<span class="pr">deploy@order-api-01:~$</span> docker ps
+CONTAINER ID   IMAGE               STATUS       PORTS
+8f2a1c9d4e11   order-api:1.8.2     Up 3 days    8080/tcp
+b71c0e228a03   redis:7.2           Up 3 days    6379/tcp
+
+<span class="pr">deploy@order-api-01:~$</span> tail -n 3 /var/log/order-api/error.log
+<span class="dm">14:02:11 WARN  thread pool active=200/200</span>
+<span class="er">14:02:14 ERROR Timeout calling inventory-service</span>
+<span class="er">14:02:15 ERROR Timeout calling inventory-service</span>
+
+<span class="pr">deploy@order-api-01:~$</span> rm -rf /var/log/order-api
+<span class="er">✕ 已拦截：危险命令（rm -rf 命中黑名单）· 未发送到远端</span>
+<span class="dm">  只读模式下仅允许白名单命令。如需清理日志，请在会话中描述需求，由 Agent 生成建议命令。</span>
+
+<span class="pr">deploy@order-api-01:~$</span> <span class="cur"></span></div>
+        <div class="termbar">
+          <span><span class="sdot"></span> 已连接 · 延迟 23ms</span>
+          <span>会话 1/5</span>
+          <span class="sr"><span>↑↓ 历史</span><span>⌘L 清屏</span><span>⌘K 命令面板</span></span>
+        </div>
+      </div>
+
+      <div class="dbody" data-dt="cap">
+        <div class="caps">
+          <div class="cap">
+            <div class="ci"><div class="cn">读取文件</div><div class="cd">cat / head / tail / less · 限定 /opt/app 与 /var/log</div></div>
+            <div class="sw"></div>
+          </div>
+          <div class="cap">
+            <div class="ci"><div class="cn">执行只读命令</div><div class="cd">白名单 42 条 · ps / df / docker ps / journalctl / systemctl status</div></div>
+            <div class="sw"></div>
+          </div>
+          <div class="cap lock">
+            <div class="ci"><div class="cn">写入文件</div><div class="cd">只读模式下不可开启</div></div>
+            <div class="sw off"></div>
+          </div>
+          <div class="cap lock">
+            <div class="ci"><div class="cn">重启服务 / 执行变更</div><div class="cd">只读模式下不可开启 · 需 M3 开放写权限</div></div>
+            <div class="sw off"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 数据库详情 ===== -->
+    <div class="view" data-view="detail-db">
+      <div class="dhead">
+        <div class="back" title="返回会话">←</div>
+        <div class="dicon">▤</div>
+        <div>
+          <div class="dname">order_db</div>
+          <div class="dsub">PostgreSQL 15.4 · order-db.prod:5432/order_db</div>
+        </div>
+        <div class="pill ok"><span class="sdot"></span>已索引</div>
+        <div class="pill ro">prod · 只读</div>
+        <div class="dacts">
+          <button class="btn">在会话中分析</button>
+          <button class="btn p">新建查询</button>
+          <div class="amore">⋯</div>
+        </div>
+      </div>
+      <div class="dtabs">
+        <div class="dtab on" data-dt="ov">概览</div>
+        <div class="dtab" data-dt="main">SQL 查询</div>
+        <div class="dtab" data-dt="browse">数据浏览</div>
+        <div class="dtab" data-dt="cap">能力授权</div>
+      </div>
+
+      <div class="dbody on" data-dt="ov">
+        <div class="banner">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><rect x="4" y="7" width="8" height="6" rx="1.5" stroke="#BA7517" stroke-width="1.3"/><path d="M6 7V5a2 2 0 014 0v2" stroke="#BA7517" stroke-width="1.3"/></svg>
+          该资产由 订单中台 共享配置，你需要绑定自己的只读账号才能查询
+        </div>
+        <div class="ov">
+          <div class="ov-grid">
+            <div class="mcard"><div class="k">表数量</div><div class="v">42</div></div>
+            <div class="mcard"><div class="k">索引耗时</div><div class="v">11<s>min</s></div></div>
+            <div class="mcard"><div class="k">平均查询</div><div class="v">42<s>ms</s></div></div>
+            <div class="mcard"><div class="k">连接数</div><div class="v">3<s>/ 20</s></div></div>
+          </div>
+
+          <div class="sect-t">连接与权限</div>
+          <div class="kv">
+            <div class="kr"><div class="kk">连接串</div><div class="vv">order-db.prod:5432/order_db</div></div>
+            <div class="kr"><div class="kk">我的凭据</div><div class="vv" style="color:var(--warning)">未绑定 · 需要你自己的只读账号　<button class="btn" style="margin-left:8px">绑定凭据</button></div></div>
+            <div class="kr"><div class="kk">申请指引</div><div class="vv">在 DBA 平台申请 prod 只读账号，命名格式 svc_&lt;姓名&gt;_ro</div></div>
+            <div class="kr"><div class="kk">Schema</div><div class="vv">public（31 表）· biz（11 表）</div></div>
+            <div class="kr"><div class="kk">护栏</div><div class="vv">自动 LIMIT 1000 · 语句超时 15s · 禁止 DDL/DML</div></div>
+            <div class="kr"><div class="kk">采样</div><div class="vv">每表 20 行，用于理解字段形态</div></div>
+          </div>
+
+          <div class="sect-t">最近查询</div>
+          <div class="kv">
+            <div class="kr"><div class="kk">3 分钟前</div><div class="vv">SELECT status, count(*) FROM "order" GROUP BY status · 38ms</div></div>
+            <div class="kr"><div class="kk">1 小时前</div><div class="vv">SELECT * FROM slow_log WHERE ... · 1,204 行 · Agent</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="dbody" data-dt="main">
+        <div class="banner">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 2l6 11H2L8 2z" stroke="#BA7517" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 6.5v3" stroke="#BA7517" stroke-width="1.3" stroke-linecap="round"/></svg>
+          生产环境 · 只读执行 · 已自动追加 LIMIT 1000
+        </div>
+        <div class="split">
+          <div class="tlist">
+            <div class="tgrp">public</div>
+            <div class="tnode on"><span class="ic">▦</span>order<span class="cn2">1.2M</span></div>
+            <div class="tnode"><span class="ic">▦</span>order_item<span class="cn2">4.8M</span></div>
+            <div class="tnode"><span class="ic">▦</span>user<span class="cn2">312k</span></div>
+            <div class="tnode"><span class="ic">▦</span>payment<span class="cn2">890k</span></div>
+            <div class="tnode"><span class="ic">▦</span>slow_log<span class="cn2">2.1M</span></div>
+            <div class="tgrp">biz</div>
+            <div class="tnode"><span class="ic">▦</span>inventory<span class="cn2">120k</span></div>
+            <div class="tnode"><span class="ic">▦</span>campaign<span class="cn2">38</span></div>
+          </div>
+          <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+            <div class="sqltools">
+              <button class="btn p" style="padding:3px 12px">▶ 执行</button>
+              <span class="kbd" style="margin-left:-2px">⌘↵</span>
+              <button class="btn">EXPLAIN</button>
+              <button class="btn">格式化</button>
+              <span style="margin-left:auto;font-size:11px;color:var(--gray-400)">结果集上限 1000 行 · 超时 15s</span>
+            </div>
+            <div class="sqlbody"><span class="ln">1 </span><span class="kw2">SELECT</span> id, user_id, status, amount, created_at
+<span class="ln">2 </span><span class="kw2">FROM</span> "order"
+<span class="ln">3 </span><span class="kw2">WHERE</span> status = <span class="str2">'PENDING'</span>
+<span class="ln">4 </span>  <span class="kw2">AND</span> created_at &gt; now() - <span class="kw2">interval</span> <span class="str2">'2 hours'</span>
+<span class="ln">5 </span><span class="kw2">ORDER BY</span> created_at <span class="kw2">DESC</span></div>
+            <div class="grid">
+              <table class="g">
+                <thead><tr><th>id</th><th>user_id</th><th>status</th><th>amount</th><th>created_at</th></tr></thead>
+                <tbody>
+                  <tr><td class="n">9821431</td><td class="n">77301</td><td><span class="tagc">PENDING</span></td><td class="n">1,299.00</td><td>2026-11-12 14:02:41</td></tr>
+                  <tr><td class="n">9821430</td><td class="n">41128</td><td><span class="tagc">PENDING</span></td><td class="n">268.50</td><td>2026-11-12 14:02:39</td></tr>
+                  <tr><td class="n">9821429</td><td class="n">90210</td><td><span class="tagc">PENDING</span></td><td class="n">4,800.00</td><td>2026-11-12 14:02:38</td></tr>
+                  <tr><td class="n">9821428</td><td class="n">33017</td><td><span class="tagc">PENDING</span></td><td class="n">99.00</td><td>2026-11-12 14:02:34</td></tr>
+                  <tr><td class="n">9821427</td><td class="n">5544</td><td><span class="tagc">PENDING</span></td><td class="n">1,050.00</td><td>2026-11-12 14:02:31</td></tr>
+                  <tr><td class="n">9821426</td><td class="n">61209</td><td><span class="tagc">PENDING</span></td><td class="n">328.00</td><td>2026-11-12 14:02:29</td></tr>
+                  <tr><td class="n">9821425</td><td class="n">18872</td><td><span class="tagc">PENDING</span></td><td class="n">2,199.00</td><td>2026-11-12 14:02:27</td></tr>
+                  <tr><td class="n">9821424</td><td class="n">7401</td><td><span class="tagc">PENDING</span></td><td class="n">76.00</td><td>2026-11-12 14:02:25</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="dbar2">
+              <span><span class="sdot"></span> 执行成功</span>
+              <span>1,283 行</span>
+              <span>42ms</span>
+              <span class="sr"><span>导出 CSV</span><span>复制结果</span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="dbody" data-dt="browse">
+        <div class="split">
+          <div class="tlist">
+            <div class="tgrp">public</div>
+            <div class="tnode on"><span class="ic">▦</span>order<span class="cn2">1.2M</span></div>
+            <div class="tnode"><span class="ic">▦</span>order_item<span class="cn2">4.8M</span></div>
+            <div class="tnode"><span class="ic">▦</span>user<span class="cn2">312k</span></div>
+            <div class="tnode"><span class="ic">▦</span>payment<span class="cn2">890k</span></div>
+          </div>
+          <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+            <div class="sqltools">
+              <span style="font-family:var(--mono);font-size:12px;color:var(--gray-900)">public.order</span>
+              <span class="atag">1,204,331 行</span>
+              <button class="btn" style="margin-left:8px">结构</button>
+              <button class="btn">索引 2</button>
+              <button class="btn">外键 3</button>
+              <span style="margin-left:auto;font-size:11px;color:var(--gray-400)">第 1 / 1,205 页</span>
+            </div>
+            <div class="grid">
+              <table class="g">
+                <thead><tr><th>id</th><th>user_id</th><th>status</th><th>amount</th><th>channel</th><th>remark</th><th>created_at</th></tr></thead>
+                <tbody>
+                  <tr><td class="n">9821431</td><td class="n">77301</td><td><span class="tagc">PENDING</span></td><td class="n">1,299.00</td><td>APP</td><td class="nul">NULL</td><td>2026-11-12 14:02:41</td></tr>
+                  <tr><td class="n">9821430</td><td class="n">41128</td><td><span class="tagc">PENDING</span></td><td class="n">268.50</td><td>WEB</td><td class="nul">NULL</td><td>2026-11-12 14:02:39</td></tr>
+                  <tr><td class="n">9821429</td><td class="n">90210</td><td>PAID</td><td class="n">4,800.00</td><td>APP</td><td>加急</td><td>2026-11-12 14:02:38</td></tr>
+                  <tr><td class="n">9821428</td><td class="n">33017</td><td>PAID</td><td class="n">99.00</td><td>MINI</td><td class="nul">NULL</td><td>2026-11-12 14:02:34</td></tr>
+                  <tr><td class="n">9821427</td><td class="n">5544</td><td>CLOSED</td><td class="n">1,050.00</td><td>WEB</td><td class="nul">NULL</td><td>2026-11-12 14:02:31</td></tr>
+                  <tr><td class="n">9821426</td><td class="n">61209</td><td>PAID</td><td class="n">328.00</td><td>APP</td><td class="nul">NULL</td><td>2026-11-12 14:02:29</td></tr>
+                  <tr><td class="n">9821425</td><td class="n">18872</td><td>PENDING</td><td class="n">2,199.00</td><td>APP</td><td>待补发票</td><td>2026-11-12 14:02:27</td></tr>
+                  <tr><td class="n">9821424</td><td class="n">7401</td><td>PAID</td><td class="n">76.00</td><td>MINI</td><td class="nul">NULL</td><td>2026-11-12 14:02:25</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="dbar2">
+              <span>已加载 8 行 · 共 1,204,331 行</span>
+              <span class="sr"><span>双击单元格复制</span><span>右键按此值筛选</span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="dbody" data-dt="cap">
+        <div class="caps">
+          <div class="cap">
+            <div class="ci"><div class="cn">读取表结构</div><div class="cd">schema / 列 / 索引 / 外键 · 用于生成查询与理解数据</div></div>
+            <div class="sw"></div>
+          </div>
+          <div class="cap">
+            <div class="ci"><div class="cn">只读查询</div><div class="cd">仅 SELECT · 自动 LIMIT 1000 · 语句超时 15s</div></div>
+            <div class="sw"></div>
+          </div>
+          <div class="cap lock">
+            <div class="ci"><div class="cn">写入数据（INSERT / UPDATE / DELETE）</div><div class="cd">只读模式下不可开启 · 生产库永久禁用</div></div>
+            <div class="sw off"></div>
+          </div>
+          <div class="cap lock">
+            <div class="ci"><div class="cn">修改表结构（DDL）</div><div class="cd">只读模式下不可开启 · 生产库永久禁用</div></div>
+            <div class="sw off"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 代码库详情 ===== -->
+    <div class="view" data-view="detail-code">
+      <div class="dhead">
+        <div class="back" title="返回会话">←</div>
+        <div class="dicon">▣</div>
+        <div>
+          <div class="dname">order-service</div>
+          <div class="dsub">/Users/li/projects/order-service · feature/order-retry</div>
+        </div>
+        <div class="pill ok"><span class="sdot"></span>已索引</div>
+        <div class="pill ro">只读</div>
+        <div class="dacts">
+          <button class="btn">在会话中询问</button>
+          <button class="btn p">打开文件 ⌘P</button>
+          <div class="amore">⋯</div>
+        </div>
+      </div>
+      <div class="dtabs">
+        <div class="dtab on" data-dt="ov">概览</div>
+        <div class="dtab" data-dt="main">编辑器</div>
+        <div class="dtab" data-dt="cap">能力授权</div>
+      </div>
+
+      <div class="dbody on" data-dt="ov">
+        <div class="ov">
+          <div class="ov-grid">
+            <div class="mcard"><div class="k">文件</div><div class="v">1,284</div></div>
+            <div class="mcard"><div class="k">代码行</div><div class="v">86.4<s>k</s></div></div>
+            <div class="mcard"><div class="k">索引覆盖</div><div class="v">100<s>%</s></div></div>
+            <div class="mcard"><div class="k">符号</div><div class="v">3,912</div></div>
+          </div>
+
+          <div class="sect-t">仓库</div>
+          <div class="kv">
+            <div class="kr"><div class="kk">路径</div><div class="vv">/Users/li/projects/order-service</div></div>
+            <div class="kr"><div class="kk">当前分支</div><div class="vv">feature/order-retry（领先 main 3 个提交）</div></div>
+            <div class="kr"><div class="kk">语言</div><div class="vv">Java 78% · TypeScript 19% · SQL 3%</div></div>
+            <div class="kr"><div class="kk">最近提交</div><div class="vv">a3f21c9 · 1 小时前 · 增加订单重试逻辑</div></div>
+            <div class="kr"><div class="kk">未提交改动</div><div class="vv">2 个文件修改（在编辑器内可查看 diff）</div></div>
+          </div>
+
+          <div class="sect-t">最近活动</div>
+          <div class="kv">
+            <div class="kr"><div class="kk">1 小时前</div><div class="vv">读取 InventoryClient.java（Agent · 会话「排查 QPS 下降」）</div></div>
+            <div class="kr"><div class="kk">今天</div><div class="vv">审查 PR #4821 涉及 6 个文件</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="dbody" data-dt="main">
+        <div class="banner">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><rect x="4" y="7" width="8" height="6" rx="1.5" stroke="#BA7517" stroke-width="1.3"/><path d="M6 7V5a2 2 0 014 0v2" stroke="#BA7517" stroke-width="1.3"/></svg>
+          只读模式仅约束 Agent：你的手动修改可直接保存；Agent 的提议修改以 patch 形式提供，确认后才会落盘
+        </div>
+        <div class="split">
+          <div class="ftree">
+            <div class="fnode"><span class="ic">▾</span>src</div>
+            <div class="fnode" style="padding-left:24px"><span class="ic">▾</span>main</div>
+            <div class="fnode" style="padding-left:38px"><span class="ic">▾</span>java</div>
+            <div class="fnode" style="padding-left:52px"><span class="ic">▾</span>order</div>
+            <div class="fnode on" style="padding-left:66px"><span class="ic">·</span>InventoryClient.java<span class="md"></span></div>
+            <div class="fnode" style="padding-left:66px"><span class="ic">·</span>OrderService.java</div>
+            <div class="fnode" style="padding-left:66px"><span class="ic">·</span>OrderController.java</div>
+            <div class="fnode" style="padding-left:66px"><span class="ic">·</span>OrderRepository.java</div>
+            <div class="fnode" style="padding-left:38px"><span class="ic">▸</span>resources</div>
+            <div class="fnode"><span class="ic">▸</span>test</div>
+            <div class="fnode"><span class="ic">·</span>pom.xml</div>
+            <div class="fnode"><span class="ic">·</span>README.md</div>
+          </div>
+          <div class="editor">
+            <div class="ebar">
+              <span class="fn">InventoryClient.java</span>
+              <span class="moddot"></span>
+              <span style="color:var(--gray-400)">已修改</span>
+              <span style="margin-left:auto;display:flex;gap:6px">
+                <button class="btn">Diff</button>
+                <button class="btn">生成 patch</button>
+                <button class="btn p">保存 ⌘S</button>
+              </span>
+            </div>
+            <div class="codewrap">
+              <div class="gutter">36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46</div>
+              <div class="codebody"><span class="cm3">@Component</span>
+<span class="kw3">public class</span> <span class="ty3">InventoryClient</span> {
+
+  <span class="kw3">public</span> <span class="ty3">InventoryResp</span> deduct(<span class="ty3">String</span> sku, <span class="kw3">int</span> qty) {
+    HttpComponentsClientHttpRequestFactory f =
+        <span class="kw3">new</span> HttpComponentsClientHttpRequestFactory();
+    <span class="mod">f.setConnectTimeout(800);</span>
+    <span class="mod">f.setReadTimeout(2000);</span>
+    restTemplate.setRequestFactory(f);
+    <span class="kw3">return</span> restTemplate.postForObject(url, req, InventoryResp.class);
+  }</div>
+            </div>
+          </div>
+          <div class="rinfo">
+            <div class="rt">大纲</div>
+            <div class="sym"><span class="sg">M</span>deduct(sku, qty)</div>
+            <div class="sym"><span class="sg">M</span>queryStock(sku)</div>
+            <div class="sym"><span class="sg">C</span>InventoryClient</div>
+            <div class="rt" style="margin-top:16px">关联</div>
+            <div class="sym" style="color:var(--gray-400)">被 3 处引用</div>
+            <div class="sym" style="color:var(--gray-400)">会话引用 2 次</div>
+            <div class="rt" style="margin-top:16px">Git</div>
+            <div class="sym" style="color:var(--gray-400)">最后修改 a3f21c9</div>
+            <div class="sym" style="color:var(--gray-400)">1 小时前 · 黎</div>
+          </div>
+        </div>
+        <div class="dbar2">
+          <span>feature/order-retry</span>
+          <span>UTF-8</span>
+          <span>Java</span>
+          <span>Ln 42, Col 31</span>
+          <span class="sr"><span>⌘F 查找</span><span>⌘P 跳转文件</span><span>F12 跳转定义</span></span>
+        </div>
+      </div>
+
+      <div class="dbody" data-dt="cap">
+        <div class="caps">
+          <div class="cap">
+            <div class="ci"><div class="cn">读取代码</div><div class="cd">限定仓库根目录 · 排除 .env / *.pem / id_rsa</div></div>
+            <div class="sw"></div>
+          </div>
+          <div class="cap">
+            <div class="ci"><div class="cn">搜索与符号跳转</div><div class="cd">全文检索 + tree-sitter 符号索引 + LSP</div></div>
+            <div class="sw"></div>
+          </div>
+          <div class="cap">
+            <div class="ci"><div class="cn">用户手动编辑并保存</div><div class="cd">你的直接修改 · 首次确认后记住本次会话</div></div>
+            <div class="sw"></div>
+          </div>
+          <div class="cap lock">
+            <div class="ci"><div class="cn">Agent 直接写入文件</div><div class="cd">只读模式下不可开启 · Agent 只能生成 patch 供你确认</div></div>
+            <div class="sw off"></div>
+          </div>
+          <div class="cap lock">
+            <div class="ci"><div class="cn">Git 写操作（commit / push / checkout）</div><div class="cd">只读模式下不可开启</div></div>
+            <div class="sw off"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="view" data-view="projects">
+      <div class="chead">
+        <div class="ctitle">项目概览</div>
+        <div class="acts"><button class="btn p">＋ 新建项目</button></div>
+      </div>
+      <div class="pjg">
+        <div class="pj-grid">
+          <div class="pjcard cur" data-pj="生产运维">
+            <div class="pjname"><span class="sdot"></span>生产运维<span class="atag">当前</span></div>
+            <div class="pjdesc">线上排障与运维。接入订单库、API 服务器与运营知识库。</div>
+            <div class="pjbar"><i style="width:86%"></i></div>
+            <div class="pjmeta"><span>7 个资产</span><span>12 个会话</span><span>仅我</span><span>2 分钟前</span></div>
+          </div>
+          <div class="pjcard" data-pj="数据平台">
+            <div class="pjname"><span class="sdot"></span>数据平台</div>
+            <div class="pjdesc">数仓建模与指标口径治理，接入了 Hive 元数据与指标字典。</div>
+            <div class="pjbar"><i style="width:100%"></i></div>
+            <div class="pjmeta"><span>4 个资产</span><span>38 个会话</span><span>共享 · 4 人</span><span>昨天</span></div>
+          </div>
+          <div class="pjcard" data-pj="交付项目">
+            <div class="pjname"><span class="sdot"></span>交付项目</div>
+            <div class="pjdesc">客户现场实施的代码与文档，只读接入，禁止任何写操作。</div>
+            <div class="pjbar"><i style="width:64%"></i></div>
+            <div class="pjmeta"><span>3 个资产</span><span>6 个会话</span><span>共享 · 2 人</span><span>3 天前</span></div>
+          </div>
+          <div class="pjnew">＋ 新建项目</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="view" data-view="settings">
+      <div class="chead"><div class="ctitle">设置</div></div>
+      <div class="set">
+        <div class="setnav">
+          <div class="si on" data-s="gen">通用</div>
+          <div class="si" data-s="model">模型</div>
+          <div class="si" data-s="perm">权限与安全</div>
+          <div class="si" data-s="privacy">数据与隐私</div>
+          <div class="si" data-s="look">外观</div>
+          <div class="si" data-s="about">关于</div>
+        </div>
+        <div class="setbody">
+
+          <div class="setsec on" data-s="gen">
+            <div class="stitle">通用</div>
+            <div class="sdesc">启动行为、语言与默认项目</div>
+            <div class="srow">
+              <div class="sl"><div class="sn">默认项目</div><div class="sd2">启动时自动打开的项目</div></div>
+              <div class="sc"><select class="sel"><option>生产运维</option><option>数据平台</option><option>交付项目</option></select></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">界面语言</div><div class="sd2">仅影响界面文案，不影响模型输出语言</div></div>
+              <div class="sc"><select class="sel"><option>简体中文</option><option>English</option></select></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">关闭窗口时</div><div class="sd2">后台任务（索引、长任务）会继续运行</div></div>
+              <div class="sc"><select class="sel"><option>最小化到托盘</option><option>退出应用</option></select></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">启动时恢复上次会话</div><div class="sd2">直接回到上次打开的会话与滚动位置</div></div>
+              <div class="sc"><button class="toggle"></button></div>
+            </div>
+          </div>
+
+          <div class="setsec" data-s="model">
+            <div class="stitle">模型</div>
+            <div class="sdesc">默认模型、失败转移与本地端点</div>
+            <div class="srow">
+              <div class="sl"><div class="sn">默认模型</div><div class="sd2">主力推理，用于计划与结论生成</div></div>
+              <div class="sc"><select class="sel"><option>Claude-Sonnet-4.5</option><option>GPT-5</option><option>本地 Ollama</option></select></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">失败时切换到</div><div class="sd2">主模型超时或限流时自动降级</div></div>
+              <div class="sc"><select class="sel"><option>GPT-5</option><option>不切换</option></select></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">单任务 token 上限</div><div class="sd2">超过即中断并提示，防止成本失控</div></div>
+              <div class="sc"><input class="sinput" value="200000"></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">本地模型端点</div><div class="sd2">Ollama / vLLM 的 OpenAI 兼容地址</div></div>
+              <div class="sc"><input class="sinput" value="http://localhost:11434/v1"></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">凭据管理</div><div class="sd2">3 个 API Key，存于系统钥匙串</div></div>
+              <div class="sc"><button class="btn">管理</button></div>
+            </div>
+          </div>
+
+          <div class="setsec" data-s="perm">
+            <div class="stitle">权限与安全</div>
+            <div class="sdesc">约束 Agent 的行为，不约束你自己的手动操作</div>
+            <div class="srow">
+              <div class="sl"><div class="sn">只读模式</div><div class="sd2">Agent 只能读取与查询；写操作转为生成建议。你的手动编辑与终端输入不受影响</div></div>
+              <div class="sc"><button class="toggle"></button></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">写操作审批</div><div class="sd2">针对 Agent 发起的写入、命令执行与部署</div></div>
+              <div class="sc"><select class="sel"><option>每次询问</option><option>本会话内记住</option><option>按风险分级</option></select></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">生产环境访问</div><div class="sd2">对所有标记为 prod 的资产生效</div></div>
+              <div class="sc"><select class="sel"><option>仅只读</option><option>完全禁止</option><option>允许（需审批）</option></select></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">敏感文件排除</div><div class="sd2">12 条规则，命中者不索引、不进入上下文</div></div>
+              <div class="sc"><button class="btn">编辑规则</button></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">命令白名单</div><div class="sd2">服务器终端可执行的 42 条只读命令</div></div>
+              <div class="sc"><button class="btn">查看</button></div>
+            </div>
+          </div>
+
+          <div class="setsec" data-s="privacy">
+            <div class="stitle">数据与隐私</div>
+            <div class="sdesc">留存、脱敏与出网控制</div>
+            <div class="srow">
+              <div class="sl"><div class="sn">会话留存</div><div class="sd2">超期自动归档，可随时手动清除</div></div>
+              <div class="sc"><select class="sel"><option>180 天</option><option>30 天</option><option>永久保留</option></select></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">外发前脱敏</div><div class="sd2">手机号、身份证、密钥在进入上下文前替换</div></div>
+              <div class="sc"><button class="toggle"></button></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">匿名使用统计</div><div class="sd2">仅上报崩溃与功能使用次数，不含内容</div></div>
+              <div class="sc"><button class="toggle off"></button></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">审计日志</div><div class="sd2">只追加，含命令全文与调用来源</div></div>
+              <div class="sc"><button class="btn">导出 CSV</button></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">清除本地数据</div><div class="sd2">索引、缓存与本地会话，不影响已上传的产物</div></div>
+              <div class="sc"><button class="btn danger">清除…</button></div>
+            </div>
+          </div>
+
+          <div class="setsec" data-s="look">
+            <div class="stitle">外观</div>
+            <div class="sdesc">主题、字号与列表密度</div>
+            <div class="srow">
+              <div class="sl"><div class="sn">主题</div><div class="sd2">深色模式为独立配色，不是简单反色</div></div>
+              <div class="sc"><select class="sel"><option>跟随系统</option><option>浅色</option><option>深色</option></select></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">界面字号</div><div class="sd2">13 / 14 / 15px 三档</div></div>
+              <div class="sc"><select class="sel"><option>标准 14px</option><option>较小 13px</option><option>较大 15px</option></select></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">代码字体</div><div class="sd2">影响编辑器、终端与代码块</div></div>
+              <div class="sc"><select class="sel"><option>JetBrains Mono</option><option>SF Mono</option><option>Consolas</option></select></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">左栏密度</div><div class="sd2">紧凑模式下每项 24px 高</div></div>
+              <div class="sc"><select class="sel"><option>标准</option><option>紧凑</option></select></div>
+            </div>
+          </div>
+
+          <div class="setsec" data-s="about">
+            <div class="stitle">关于</div>
+            <div class="sdesc">版本、日志与诊断</div>
+            <div class="srow">
+              <div class="sl"><div class="sn">DevWork 0.4.2</div><div class="sd2">Electron 33 · macOS arm64</div></div>
+              <div class="sc"><button class="btn">检查更新</button></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">日志目录</div><div class="sd2">~/Library/Logs/DevWork</div></div>
+              <div class="sc"><button class="btn">打开</button></div>
+            </div>
+            <div class="srow">
+              <div class="sl"><div class="sn">导出诊断信息</div><div class="sd2">含索引状态、MCP 连接与最近错误，不含代码与凭据</div></div>
+              <div class="sc"><button class="btn">导出</button></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <div class="view" data-view="user">
+      <div class="chead"><div class="ctitle">用户中心</div></div>
+      <div class="setbody">
+        <div class="stitle">组织</div>
+        <div class="sdesc">组织决定项目与资产的共享范围，也是计费主体</div>
+        <div class="srow">
+          <div class="sl"><div class="sn">订单中台</div><div class="sd2">当前身份：管理员 · 可管理成员、下发策略、共享资产</div></div>
+          <div class="sc"><button class="btn">切换组织</button></div>
+        </div>
+        <div class="srow">
+          <div class="sl"><div class="sn">成员 12 / 20 席位</div><div class="sd2">共享的是项目与资产配置，凭据始终不共享</div></div>
+          <div class="sc"><button class="btn" id="to-org">管理成员</button></div>
+        </div>
+        <div class="srow">
+          <div class="sl"><div class="sn">团队版 · ¥199 / 席位 / 月</div><div class="sd2">续费日 2026-12-01 · 付款人 黎忠芳</div></div>
+          <div class="sc"><button class="btn">账单</button></div>
+        </div>
+
+        <div class="stitle" style="margin-top:22px">账号</div>
+        <div class="sdesc">用于登录与识别身份</div>
+        <div class="srow">
+          <div class="sl"><div class="sn">黎忠芳</div><div class="sd2">li.zhongfang@example.com</div></div>
+          <div class="sc"><button class="btn">修改资料</button></div>
+        </div>
+        <div class="srow">
+          <div class="sl"><div class="sn">登录方式</div><div class="sd2">邮箱验证码 · 微信扫码，两种都已绑定</div></div>
+          <div class="sc"><button class="btn">管理</button></div>
+        </div>
+
+        <div class="stitle" style="margin-top:22px">用量</div>
+        <div class="sdesc">按组织计量，也能查到自己用了多少</div>
+        <div class="srow">
+          <div class="sl">
+            <div class="sn">组织本月 1.2 亿 / 3 亿 token</div>
+            <div class="usebar"><i style="width:40%"></i></div>
+            <div class="sd2" style="margin-top:6px">其中你用了 128 万（含检索与工具调用），约 12 天后达上限</div>
+          </div>
+          <div class="sc"><span style="font-size:12px;color:var(--gray-600)">¥1,860</span></div>
+        </div>
+        <div class="srow">
+          <div class="sl"><div class="sn">个人配额 300 万 / 月</div><div class="sd2">由管理员设置，防止单人占满组织额度</div></div>
+          <div class="sc"><span style="font-size:12px;color:var(--gray-600)">已用 42%</span></div>
+        </div>
+
+        <div class="stitle" style="margin-top:22px">设备与登录</div>
+        <div class="sdesc">异常登录会在这里标出</div>
+        <div class="srow">
+          <div class="sl"><div class="sn">MacBook Pro · 深圳</div><div class="sd2">当前设备 · 最后活跃 刚刚</div></div>
+          <div class="sc"><span class="atag">本机</span></div>
+        </div>
+        <div class="srow">
+          <div class="sl"><div class="sn">Windows 台式机 · 深圳</div><div class="sd2">最后活跃 2 天前</div></div>
+          <div class="sc"><button class="btn">退出</button></div>
+        </div>
+        <div class="srow">
+          <div class="sl"><div class="sn">在所有设备退出登录</div><div class="sd2">会让你重新登录，正在运行的任务会中断</div></div>
+          <div class="sc"><button class="btn">全部退出</button></div>
+        </div>
+
+        <div class="stitle" style="margin-top:22px">数据</div>
+        <div class="sdesc">你的会话、产物与索引都属于你</div>
+        <div class="srow">
+          <div class="sl"><div class="sn">导出我的数据</div><div class="sd2">会话记录、产物清单与设置，不含凭据</div></div>
+          <div class="sc"><button class="btn">导出</button></div>
+        </div>
+        <div class="srow">
+          <div class="sl"><div class="sn">删除账号</div><div class="sd2">同时删除云端会话与产物，不可恢复</div></div>
+          <div class="sc"><button class="btn danger">删除…</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="view" data-view="org">
+      <div class="chead">
+        <div class="ctitle">组织管理 · 订单中台</div>
+        <div class="acts"><span class="atag">仅管理员可见</span></div>
+      </div>
+      <div class="set">
+        <div class="setnav">
+          <div class="si on" data-s="m">成员</div>
+          <div class="si" data-s="r">角色与权限</div>
+          <div class="si" data-s="p">策略</div>
+          <div class="si" data-s="a">审计</div>
+        </div>
+        <div class="setbody">
+
+          <div class="setsec on" data-s="m">
+            <div class="stitle">成员</div>
+            <div class="sdesc">12 / 20 席位，8 个可用。邀请后对方需自行绑定凭据才能使用共享资产。</div>
+            <div class="mbar">
+              <span class="mstat">按最近活跃排序</span>
+              <button class="btn">筛选角色</button>
+              <button class="btn p">＋ 邀请成员</button>
+            </div>
+            <div class="mtable">
+              <div class="mth">
+                <div class="c1">姓名</div><div class="c2">邮箱</div>
+                <div class="c3">角色</div><div class="c4">状态</div><div class="c5">最近活跃</div><div class="c6"></div>
+              </div>
+              <div class="mrow">
+                <div class="c1"><div class="mav">黎</div><span class="nm">黎忠芳</span></div>
+                <div class="c2">li.zhongfang@example.com</div>
+                <div class="c3"><span class="role adm">管理员</span></div>
+                <div class="c4"><span class="stt">活跃</span></div>
+                <div class="c5">刚刚</div>
+                <div class="c6">⋯</div>
+              </div>
+              <div class="mrow">
+                <div class="c1"><div class="mav">张</div><span class="nm">张伟</span></div>
+                <div class="c2">zhangwei@example.com</div>
+                <div class="c3"><span class="role">成员</span></div>
+                <div class="c4"><span class="stt">活跃</span></div>
+                <div class="c5">2 小时前</div>
+                <div class="c6">⋯</div>
+              </div>
+              <div class="mrow">
+                <div class="c1"><div class="mav">李</div><span class="nm">李娜</span></div>
+                <div class="c2">lina@example.com</div>
+                <div class="c3"><span class="role">成员</span></div>
+                <div class="c4"><span class="stt">活跃</span></div>
+                <div class="c5">昨天</div>
+                <div class="c6">⋯</div>
+              </div>
+              <div class="mrow">
+                <div class="c1"><div class="mav">王</div><span class="nm">王强</span></div>
+                <div class="c2">wangqiang@example.com</div>
+                <div class="c3"><span class="role gst">只读访客</span></div>
+                <div class="c4"><span class="stt pending">待接受</span></div>
+                <div class="c5">—</div>
+                <div class="c6">⋯</div>
+              </div>
+            </div>
+            <div class="sdesc" style="margin-top:10px">
+              移除成员时会要求指定资产接收人——他建的资产不会变成孤儿。
+            </div>
+          </div>
+
+          <div class="setsec" data-s="r">
+            <div class="stitle">角色与权限</div>
+            <div class="sdesc">三个内置角色，够用且不用配。自定义角色留到后续。</div>
+            <table class="ptable">
+              <tr>
+                <th style="width:44%">能力</th><th>管理员</th><th>成员</th><th>只读访客</th>
+              </tr>
+              <tr>
+                <td>查看项目与资产</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td>
+              </tr>
+              <tr>
+                <td>发起会话与只读查询</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td>
+              </tr>
+              <tr>
+                <td>编辑资产配置</td><td class="y">✓</td><td class="y">✓</td><td class="n">—</td>
+              </tr>
+              <tr>
+                <td>绑定并调用凭据</td><td class="y">✓</td><td class="y">✓</td><td class="n">—</td>
+              </tr>
+              <tr>
+                <td>邀请与移除成员</td><td class="y">✓</td><td class="n">—</td><td class="n">—</td>
+              </tr>
+              <tr>
+                <td>下发组织策略</td><td class="y">✓</td><td class="n">—</td><td class="n">—</td>
+              </tr>
+              <tr>
+                <td>查看审计日志</td><td class="y">✓</td><td class="mut">仅自己</td><td class="n">—</td>
+              </tr>
+            </table>
+            <div class="sdesc" style="margin-top:10px">
+              只读访客不能绑定凭据——这是他"只看不查"的技术保证，不靠自觉。
+            </div>
+          </div>
+
+          <div class="setsec" data-s="p">
+            <div class="stitle">策略</div>
+            <div class="sdesc">这里下发的策略会覆盖成员的本地设置，且成员无法自行关闭。</div>
+
+            <div class="srow">
+              <div class="sl">
+                <div class="sn">全组织强制只读</div>
+                <div class="sd2">Agent 只能读取与查询；写操作转为生成建议</div>
+                <div class="impact">影响 12 名成员 · 7 个资产 · 成员无法关闭</div>
+              </div>
+              <div class="sc"><button class="toggle"></button></div>
+            </div>
+
+            <div class="srow">
+              <div class="sl">
+                <div class="sn">生产环境访问</div>
+                <div class="sd2">对所有标记为 prod 的资产生效</div>
+                <div class="impact">影响 3 个 prod 资产</div>
+              </div>
+              <div class="sc"><select class="sel"><option>仅只读</option><option>完全禁止</option><option>需双人审批</option></select></div>
+            </div>
+
+            <div class="srow">
+              <div class="sl">
+                <div class="sn">命令白名单</div>
+                <div class="sd2">统一 42 条只读命令，成员不可自行添加</div>
+              </div>
+              <div class="sc"><button class="btn">编辑</button></div>
+            </div>
+
+            <div class="srow">
+              <div class="sl">
+                <div class="sn">敏感文件规则</div>
+                <div class="sd2">12 条排除规则，命中者不进索引也不进上下文</div>
+              </div>
+              <div class="sc"><button class="btn">编辑</button></div>
+            </div>
+
+            <div class="srow">
+              <div class="sl">
+                <div class="sn">模型与端点</div>
+                <div class="sd2">当前允许成员自行选择；锁定后只能用组织配置</div>
+              </div>
+              <div class="sc"><select class="sel"><option>成员可自选</option><option>锁定为组织配置</option></select></div>
+            </div>
+          </div>
+
+          <div class="setsec" data-s="a">
+            <div class="stitle">审计</div>
+            <div class="sdesc">只追加，不可修改。保留 180 天，可导出给安全团队。</div>
+            <div class="mbar">
+              <div class="fchip on">全部</div>
+              <div class="fchip">命令执行</div>
+              <div class="fchip">凭据访问</div>
+              <div class="fchip">策略变更</div>
+              <div class="fchip">成员变更</div>
+              <button class="btn" style="margin-left:auto">导出 CSV</button>
+            </div>
+            <div class="mtable">
+              <div class="mth">
+                <div class="c5" style="width:104px">时间</div>
+                <div class="c3" style="width:76px">操作人</div>
+                <div class="c1">动作</div>
+                <div class="c2">对象</div>
+                <div class="c4" style="width:52px">结果</div>
+              </div>
+              <div class="mrow">
+                <div class="c5" style="width:104px">今天 09:42</div>
+                <div class="c3" style="width:76px">黎忠芳</div>
+                <div class="c1"><span class="nm">exec.run · systemctl status</span></div>
+                <div class="c2">order-api-01</div>
+                <div class="c4" style="width:52px"><span class="stt">放行</span></div>
+              </div>
+              <div class="mrow">
+                <div class="c5" style="width:104px">今天 09:31</div>
+                <div class="c3" style="width:76px">张伟</div>
+                <div class="c1"><span class="nm">secret.read · 绑定凭据</span></div>
+                <div class="c2">order_db (prod)</div>
+                <div class="c4" style="width:52px"><span class="stt">成功</span></div>
+              </div>
+              <div class="mrow">
+                <div class="c5" style="width:104px">今天 08:10</div>
+                <div class="c3" style="width:76px">Agent</div>
+                <div class="c1"><span class="nm">tool.invoke · fs_truncate_log</span></div>
+                <div class="c2">order-api-01</div>
+                <div class="c4" style="width:52px"><span class="stt pending">拦截</span></div>
+              </div>
+              <div class="mrow">
+                <div class="c5" style="width:104px">昨天 18:22</div>
+                <div class="c3" style="width:76px">黎忠芳</div>
+                <div class="c1"><span class="nm">policy.change · 强制只读 开启</span></div>
+                <div class="c2">订单中台</div>
+                <div class="c4" style="width:52px"><span class="stt">生效</span></div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <aside class="ctx" id="ctx">
+    <div class="ptabs">
+      <div class="ptab on" data-p="ctx">上下文</div>
+      <div class="ptab" data-p="run">执行</div>
+      <div class="ptab" data-p="out">产物</div>
+    </div>
+    <div class="pbody">
+
+      <div class="pb on" data-p="ctx">
+        <div class="pt">已挂载 2 个资产</div>
+        <div class="achip"><div class="an">@ 生产库</div><div class="am">6 表 · 只读</div></div>
+        <div class="achip"><div class="an">@ 运营知识库</div><div class="am">3 片段</div></div>
+
+        <div class="pt" style="margin-top:14px">检索命中</div>
+        <div class="hit">
+          <div class="hn">GMV 口径说明</div>
+          <div class="hm"><span>v2.3</span><span>命中 0.87</span></div>
+        </div>
+        <div class="hit">
+          <div class="hn">2026Q3 运营复盘</div>
+          <div class="hm"><span>第 4 节</span><span>命中 0.72</span></div>
+        </div>
+
+        <div class="pt" style="margin-top:14px">上下文构成</div>
+        <div class="bars">
+          <div class="r"><span class="nm">系统提示</span><span class="b"><i style="width:18%"></i></span><span class="v">3k</span></div>
+          <div class="r"><span class="nm">检索结果</span><span class="b"><i style="width:62%"></i></span><span class="v">11k</span></div>
+          <div class="r"><span class="nm">工具结果</span><span class="b"><i style="width:78%"></i></span><span class="v">14k</span></div>
+          <div class="r"><span class="nm">历史对话</span><span class="b"><i style="width:22%"></i></span><span class="v">4k</span></div>
+        </div>
+      </div>
+
+      <div class="pb" data-p="run">
+        <div class="pt">本次执行 3 步</div>
+        <div class="hit">
+          <div class="hn">pg_sql_query</div>
+          <div class="hm"><span>已自动放行</span><span>1.8s</span></div>
+        </div>
+        <div class="hit">
+          <div class="hn">pg_sql_query</div>
+          <div class="hm"><span>已自动放行</span><span>0.9s</span></div>
+        </div>
+        <div class="hit" style="border-color:var(--warning-line);background:var(--warning-bg)">
+          <div class="hn">fs_truncate_log</div>
+          <div class="hm"><span style="color:var(--warning)">待审批 · 未执行</span></div>
+        </div>
+        <div class="pt" style="margin-top:14px">工具耗时</div>
+        <div class="bars">
+          <div class="r"><span class="nm">pg_sql_query</span><span class="b"><i style="width:88%"></i></span><span class="v">1.8s</span></div>
+          <div class="r"><span class="nm">kb_search</span><span class="b"><i style="width:42%"></i></span><span class="v">0.9s</span></div>
+          <div class="r"><span class="nm">chart_render</span><span class="b"><i style="width:26%"></i></span><span class="v">0.5s</span></div>
+        </div>
+      </div>
+
+      <div class="pb" data-p="out">
+        <div class="pt">本次产物 2 个</div>
+        <div class="frow">
+          <div class="fi" style="background:#EAF1FE;color:#2F6FEB">DOC</div>
+          <div class="fn">季度复盘.docx</div>
+          <span style="font-size:11px;color:var(--gray-400)">86KB</span>
+        </div>
+        <div class="frow">
+          <div class="fi" style="background:#EAF1FE;color:#2F6FEB">PNG</div>
+          <div class="fn">gmv_trend.png</div>
+          <span style="font-size:11px;color:var(--gray-400)">128KB</span>
+        </div>
+        <div class="pt" style="margin-top:14px">说明</div>
+        <div style="font-size:11.5px;color:var(--gray-400);line-height:1.7">
+          产物会随会话保存，也可发布到资料库或直接下载。
+        </div>
+      </div>
+
+    </div>
+  </aside>
+
+</div>
+
+<div class="sbar">
+  <span>模型 Claude-Sonnet</span>
+  <span>上下文 32k/200k</span>
+  <span>本会话 ¥0.42</span>
+  <span class="r"><span><span class="dotok"></span>就绪</span></span>
+</div>
+
+<script>
+  var ctx = document.getElementById('ctx');
+
+  function resetTabs(name){
+    var v = document.querySelector('.view[data-view="' + name + '"]');
+    if(!v) return;
+    v.querySelectorAll('.dtab').forEach(function(t){ t.classList.remove('on'); });
+    v.querySelectorAll('.dbody').forEach(function(d){ d.classList.remove('on'); });
+    var ft = v.querySelector('.dtab');   if(ft) ft.classList.add('on');
+    var fd = v.querySelector('.dbody');  if(fd) fd.classList.add('on');
+  }
+
+  function view(name){
+    document.querySelectorAll('.view').forEach(function(v){
+      v.classList.toggle('on', v.dataset.view === name);
+    });
+    ctx.classList.toggle('off', name !== 'chat');
+    if(name !== 'chat') resetTabs(name);
+    document.querySelectorAll('.aitem').forEach(function(x){
+      x.classList.toggle('cur', x.dataset.go && name === 'detail-' + x.dataset.go);
+    });
+  }
+
+  document.querySelectorAll('.folder').forEach(function(f){
+    f.addEventListener('click', function(){
+      var kids = f.nextElementSibling;
+      if(kids && kids.classList.contains('kids')){
+        kids.classList.toggle('hide');
+        f.classList.toggle('open');
+      }
+    });
+  });
+
+  document.querySelectorAll('.sitem').forEach(function(s){
+    s.addEventListener('click', function(){
+      view('chat');
+      document.querySelectorAll('.sitem').forEach(function(x){ x.classList.remove('on'); });
+      s.classList.add('on');
+    });
+  });
+
+  document.querySelectorAll('.ptab').forEach(function(t){
+    t.addEventListener('click', function(){
+      document.querySelectorAll('.ptab').forEach(function(x){ x.classList.remove('on'); });
+      t.classList.add('on');
+      document.querySelectorAll('.pb').forEach(function(b){
+        b.classList.toggle('on', b.dataset.p === t.dataset.p);
+      });
+    });
+  });
+
+  document.querySelectorAll('.aitem[data-go]').forEach(function(r){
+    r.addEventListener('click', function(){ view('detail-' + r.dataset.go); });
+  });
+
+  document.getElementById('to-projects').addEventListener('click', function(){ view('projects'); });
+  document.getElementById('to-settings').addEventListener('click', function(){ view('settings'); });
+  document.getElementById('to-user').addEventListener('click', function(){ view('user'); });
+  document.querySelectorAll('.ufoot,.sfoot').forEach(function(el){
+    el.addEventListener('click', function(){
+      document.querySelectorAll('.ufoot,.sfoot').forEach(function(x){ x.classList.remove('on'); });
+      el.classList.add('on');
+    });
+  });
+
+  document.querySelectorAll('.pjcard').forEach(function(c){
+    c.addEventListener('click', function(){
+      document.getElementById('wsname').textContent = c.dataset.pj;
+      document.querySelectorAll('.pjcard').forEach(function(x){ x.classList.remove('cur'); });
+      c.classList.add('cur');
+      view('chat');
+    });
+  });
+
+  document.querySelectorAll('.setnav .si').forEach(function(n){
+    n.addEventListener('click', function(){
+      var scope = n.closest('.view');
+      scope.querySelectorAll('.setnav .si').forEach(function(x){ x.classList.remove('on'); });
+      n.classList.add('on');
+      scope.querySelectorAll('.setsec').forEach(function(sec){
+        sec.classList.toggle('on', sec.dataset.s === n.dataset.s);
+      });
+    });
+  });
+
+  var toOrg = document.getElementById('to-org');
+  if(toOrg) toOrg.addEventListener('click', function(){ view('org'); });
+
+  document.querySelectorAll('.toggle').forEach(function(t){
+    t.addEventListener('click', function(){ t.classList.toggle('off'); });
+  });
+
+  document.querySelectorAll('.back').forEach(function(b){
+    b.addEventListener('click', function(){ view('chat'); });
+  });
+
+  document.querySelectorAll('.dtab').forEach(function(t){
+    t.addEventListener('click', function(){
+      var v = t.closest('.view');
+      v.querySelectorAll('.dtab').forEach(function(x){ x.classList.remove('on'); });
+      t.classList.add('on');
+      v.querySelectorAll('.dbody').forEach(function(d){
+        d.classList.toggle('on', d.dataset.dt === t.dataset.dt);
+      });
+    });
+  });
+</script>
+</body>
+</html>
