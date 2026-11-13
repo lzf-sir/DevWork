@@ -84,6 +84,8 @@ import { PORT } from '../config';
 
 type Row = Record<string, unknown>;
 import { body, optionalId, assertWorkspace, workspaceGuard, requireRow, requireAssetId } from './helpers';
+import { parseBody } from '../http/validate';
+import { assetCreateSchema } from '../../../shared/contracts';
 
 export function registerAssetRoutes(app: Express): void {
   app.get('/api/assets', wrap(async (req: Request, res: Response) => {
@@ -99,7 +101,9 @@ export function registerAssetRoutes(app: Express): void {
     })));
   }));
   app.post('/api/assets', wrap(async (req: Request, res: Response) => {
-    const payload = body(req);
+    /* 契约校验：形状与枚举由 shared/contracts/asset.ts 定义，前后端同一份。
+     * 失败抛 E_VALIDATION（HTTP 400），不会走到下面的清洗与落库。 */
+    const payload = parseBody(assetCreateSchema, req);
     const id = newId('a');
     const workspaceId = String(payload.workspaceId ?? 'w-ops');
     const type = String(payload.type ?? 'code');

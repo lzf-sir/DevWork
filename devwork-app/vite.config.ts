@@ -26,6 +26,8 @@ export default defineConfig({
   server: {
     host: '127.0.0.1',
     port: 5173,
+    /* 契约层在仓库根的 shared/（frontend 之外），dev server 需显式放行。 */
+    fs: { allow: ['..'] },
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:3001',

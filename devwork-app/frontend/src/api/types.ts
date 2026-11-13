@@ -326,16 +326,10 @@ export interface MessageTurn {
   gateway: 'mock' | 'openai-compatible';
 }
 
-export interface SendMessageInput {
-  content: string;
-  assetIds?: string[];
-  /** 已上传附件的文件名（先走 POST /attachments，再随消息提交）。 */
-  attachments?: string[];
-  /** 会话级模型覆盖：只影响本次调用，不改全局模型配置。 */
-  model?: string;
-  /** 重试：沿用已有用户气泡重新生成回复，不再插入一条新气泡。 */
-  regenerate?: boolean;
-}
+/* 写入载荷的唯一真源在 shared/contracts（zod schema 推导）；
+ * 这里只做转出，避免前后端各写一份接口定义再靠人肉对齐。 */
+import type { SendMessageInput as SendMessageInputContract } from '../../../shared/contracts';
+export type SendMessageInput = SendMessageInputContract;
 
 /** 消息时间线截断（撤回 / 编辑重发 / 重试共用）。 */
 export interface TruncateMessagesInput {

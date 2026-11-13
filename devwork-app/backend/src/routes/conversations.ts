@@ -84,6 +84,8 @@ import { PORT } from '../config';
 
 type Row = Record<string, unknown>;
 import { body, optionalId, requireRow } from './helpers';
+import { parseBody } from '../http/validate';
+import { sendMessageSchema } from '../../../shared/contracts';
 
 export function registerConversationRoutes(app: Express): void {
   /* ---------------- G4 会话 / 消息 / 引用 ---------------- */
@@ -143,7 +145,9 @@ export function registerConversationRoutes(app: Express): void {
     ok(res, await listMessageCards(id));
   }));
   app.post('/api/conversations/:id/messages', wrap(async (req: Request, res: Response) => {
-    const payload = body(req);
+    /* 契约校验：content / assetIds / attachments / model / regenerate 由 shared 定义。
+     * content 允许为空 ——「重试」复用同一端点且沿用已有用户气泡（regenerate=true）。 */
+    const payload = parseBody(sendMessageSchema, req);
     const result = await sendMessage(String(req.params.id), {
       content: String(payload.content ?? ''),
       assetIds: Array.isArray(payload.assetIds) ? (payload.assetIds as string[]) : [],
