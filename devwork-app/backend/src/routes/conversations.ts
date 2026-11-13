@@ -85,7 +85,7 @@ import { PORT } from '../config';
 type Row = Record<string, unknown>;
 import { body, optionalId, requireRow } from './helpers';
 import { parseBody } from '../http/validate';
-import { sendMessageSchema } from '../../../shared/contracts';
+import { approvalDecisionSchema, approvalRollbackSchema, attachmentUploadSchema, commandSuggestionSchema, conversationCreateSchema, conversationPatchSchema, sendMessageSchema, truncateMessagesSchema } from '../../../shared/contracts';
 
 export function registerConversationRoutes(app: Express): void {
   /* ---------------- G4 会话 / 消息 / 引用 ---------------- */
@@ -120,7 +120,7 @@ export function registerConversationRoutes(app: Express): void {
     )).map(conversationShape));
   }));
   app.post('/api/conversations', wrap(async (req: Request, res: Response) => {
-    const payload = body(req);
+    const payload = parseBody(conversationCreateSchema, req);
     const id = newId('c');
     /* assetId 可选：普通会话不带绑定，从资产页唤起的会话带上。 */
     const assetId = optionalId(payload.assetId);
@@ -162,14 +162,14 @@ export function registerConversationRoutes(app: Express): void {
   /* 消息时间线截断（撤回 / 编辑重发 / 重试的共同原语）：
    * inclusive 连目标一起删；after 保留目标（用户气泡）删其后全部内容。 */
   app.post('/api/conversations/:id/messages/truncate', wrap(async (req: Request, res: Response) => {
-    const payload = body(req);
+    const payload = parseBody(truncateMessagesSchema, req);
     const mode = String(payload.mode ?? 'inclusive') === 'after' ? 'after' : 'inclusive';
     ok(res, await truncateMessages(String(req.params.id), String(payload.messageId ?? ''), mode));
   }));
   /* B16：SSE 流式端点 —— 逐事件推送（text_delta 增量 / tool_call / citation / conclusion），
    * 结束时推送 { type:'result', result: TurnResult }，与一次性端点同一持久化语义。 */
   app.post('/api/conversations/:id/stream', async (req: Request, res: Response) => {
-    const payload = body(req);
+    const payload = parseBody(sendMessageSchema, req);
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -219,7 +219,7 @@ export function registerConversationRoutes(app: Express): void {
   const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
   app.post('/api/conversations/:id/attachments', wrap(async (req: Request, res: Response) => {
     requireRow(get<Row>('SELECT id FROM conversation WHERE id = ?', String(req.params.id)), '会话');
-    const payload = body(req);
+    const payload = parseBody(attachmentUploadSchema, req);
     const name = String(payload.name ?? '').trim().replace(/[\\/:*?"<>|]/g, '_');
     if (!name) throw new ApiFailure('E_VALIDATION', '附件文件名不能为空');
     const buf = Buffer.from(String(payload.contentBase64 ?? ''), 'base64');
@@ -241,35 +241,43 @@ export function registerConversationRoutes(app: Express): void {
     ok(res, { id, name, fileName: name, sizeBytes: buf.length });
   }));
   app.post('/api/conversations/:id/approvals/:messageId', wrap(async (req: Request, res: Response) => {
-    const scope = String(body(req).scope ?? 'once') === 'session' ? 'session' : 'once';
+    /* 契约校验一次，块内统一用 payload：同一请求重复解析只是浪费。 */
+    const payload = parseBody(approvalDecisionSchema, req);
+    const scope = String(payload.scope ?? 'once') === 'session' ? 'session' : 'once';
     ok(res, await respondApproval(String(req.params.id), String(req.params.messageId),
-      String(body(req).decision ?? 'deny') === 'approve' ? 'approve' : 'deny', (await identity(req)).name, scope));
+      String(payload.decision ?? 'deny') === 'approve' ? 'approve' : 'deny', (await identity(req)).name, scope));
   }));
   app.post('/api/approvals/:messageId', wrap(async (req: Request, res: Response) => {
-    const scope = String(body(req).scope ?? 'once') === 'session' ? 'session' : 'once';
-    ok(res, await respondApproval(String(body(req).conversationId ?? 'c-gmv'), String(req.params.messageId),
-      String(body(req).decision ?? 'deny') === 'approve' ? 'approve' : 'deny', (await identity(req)).name, scope));
+    /* 契约校验一次，块内统一用 payload：同一请求重复解析只是浪费。 */
+    const payload = parseBody(approvalDecisionSchema, req);
+    const scope = String(payload.scope ?? 'once') === 'session' ? 'session' : 'once';
+    ok(res, await respondApproval(String(payload.conversationId ?? 'c-gmv'), String(req.params.messageId),
+      String(payload.decision ?? 'deny') === 'approve' ? 'approve' : 'deny', (await identity(req)).name, scope));
   }));
   /* 回滚端点（V2 写能力层的 rollback 闸门）：按审批卡 payload.rollbackRef 分派。 */
   app.post('/api/conversations/:id/approvals/:messageId/rollback', wrap(async (req: Request, res: Response) => {
     ok(res, await rollbackApproval(String(req.params.id), String(req.params.messageId), (await identity(req)).name));
   }));
   app.post('/api/approvals/:messageId/rollback', wrap(async (req: Request, res: Response) => {
-    ok(res, await rollbackApproval(String(body(req).conversationId ?? 'c-gmv'), String(req.params.messageId), (await identity(req)).name));
+    ok(res, await rollbackApproval(String(parseBody(approvalRollbackSchema, req).conversationId ?? 'c-gmv'), String(req.params.messageId), (await identity(req)).name));
   }));
   app.post('/api/conversations/:id/command-suggestions', wrap(async (req: Request, res: Response) => {
+    /* 契约校验一次，块内统一用 payload：同一请求重复解析只是浪费。 */
+    const payload = parseBody(commandSuggestionSchema, req);
     ok(res, await createCommandSuggestion(String(req.params.id), {
-      command: String(body(req).command ?? ''), reason: String(body(req).reason ?? ''),
+      command: String(payload.command ?? ''), reason: String(payload.reason ?? ''),
     }));
   }));
   app.post('/api/command-suggestions', wrap(async (req: Request, res: Response) => {
-    ok(res, await createCommandSuggestion(String(body(req).conversationId ?? 'c-gmv'), {
-      command: String(body(req).command ?? ''), reason: String(body(req).reason ?? ''),
+    /* 契约校验一次，块内统一用 payload：同一请求重复解析只是浪费。 */
+    const payload = parseBody(commandSuggestionSchema, req);
+    ok(res, await createCommandSuggestion(String(payload.conversationId ?? 'c-gmv'), {
+      command: String(payload.command ?? ''), reason: String(payload.reason ?? ''),
     }));
   }));
   app.patch('/api/conversations/:id', wrap(async (req: Request, res: Response) => {
     const id = String(req.params.id);
-    const payload = body(req);
+    const payload = parseBody(conversationPatchSchema, req);
     if (typeof payload.title === 'string') run('UPDATE conversation SET title = ? WHERE id = ?', payload.title, id);
     /* 归档 / 恢复：archived=true 记下归档时间并从侧栏隐藏；false 清空时间回到原文件夹。 */
     if (typeof payload.archived === 'boolean') {

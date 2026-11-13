@@ -84,17 +84,21 @@ import { PORT } from '../config';
 
 type Row = Record<string, unknown>;
 import { body, requireRow } from './helpers';
+import { parseBody } from '../http/validate';
+import { workspaceCreateSchema, workspacePatchSchema } from '../../../shared/contracts';
 
 export function registerWorkspaceRoutes(app: Express): void {
   app.get('/api/workspaces', async (_req, res) => ok(res, await listWorkspaces()));
   app.post('/api/workspaces', wrap(async (req: Request, res: Response) => {
-    const name = String(body(req).name ?? '').trim();
+    /* 契约校验一次，块内统一用 payload：同一请求重复解析只是浪费。 */
+    const payload = parseBody(workspaceCreateSchema, req);
+    const name = String(payload.name ?? '').trim();
     if (!name) throw new ApiFailure('E_VALIDATION', 'name 必须是非空字符串');
     const id = newId('w');
     run(
       `INSERT INTO workspace (id,name,description,index_progress,assets_count,conversations_count,owner_label,recent_label,trust_level,created_at)
        VALUES (?,?,?,?,?,?,?,?,?,?)`,
-      id, name, String(body(req).description ?? ''), 0, 0, 0, '仅我', '刚刚', 'normal', nowIso(),
+      id, name, String(payload.description ?? ''), 0, 0, 0, '仅我', '刚刚', 'normal', nowIso(),
     );
     ok(res, await workspaceShape(requireRow(get<Row>('SELECT * FROM workspace WHERE id = ?', id), '工作区')));
   }));
@@ -124,7 +128,7 @@ export function registerWorkspaceRoutes(app: Express): void {
   app.patch('/api/workspaces/:id', wrap(async (req: Request, res: Response) => {
     const id = String(req.params.id);
     requireRow(await workspaceById(id), '工作区');
-    const patch = body(req);
+    const patch = parseBody(workspacePatchSchema, req);
     if (typeof patch.name === 'string') run('UPDATE workspace SET name = ? WHERE id = ?', patch.name, id);
     if (typeof patch.description === 'string') run('UPDATE workspace SET description = ? WHERE id = ?', patch.description, id);
     ok(res, requireRow(await workspaceById(id), '工作区'));

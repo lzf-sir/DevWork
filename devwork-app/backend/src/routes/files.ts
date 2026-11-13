@@ -84,6 +84,8 @@ import { PORT } from '../config';
 
 type Row = Record<string, unknown>;
 import { body, requireAssetId } from './helpers';
+import { parseBody } from '../http/validate';
+import { agentWriteSchema, patchFileSchema, saveFileSchema } from '../../../shared/contracts';
 
 export function registerFileRoutes(app: Express): void {
   app.get('/api/assets/:id/files/tree', wrap(async (req: Request, res: Response) => {
@@ -111,16 +113,22 @@ export function registerFileRoutes(app: Express): void {
   }));
   /* B19：模型 API Key —— 存取走 OS 钥匙串（safeStorage），只回状态不回明文。 */
   app.post('/api/assets/:id/files/save', wrap(async (req: Request, res: Response) => {
+    /* 契约校验一次，块内统一用 payload：同一请求重复解析只是浪费。 */
+    const payload = parseBody(saveFileSchema, req);
     const assetId = await requireAssetId(req);
-    ok(res, await save(assetId, String(body(req).path ?? ''), String(body(req).content ?? ''), await identity(req)));
+    ok(res, await save(assetId, String(payload.path ?? ''), String(payload.content ?? ''), await identity(req)));
   }));
   app.post('/api/assets/:id/files/agent-write', wrap(async (req: Request, res: Response) => {
+    /* 契约校验一次，块内统一用 payload：同一请求重复解析只是浪费。 */
+    const payload = parseBody(agentWriteSchema, req);
     const assetId = await requireAssetId(req);
-    ok(res, await agentWrite(assetId, String(body(req).path ?? ''), String(body(req).patch ?? ''), await identity(req)));
+    ok(res, await agentWrite(assetId, String(payload.path ?? ''), String(payload.patch ?? ''), await identity(req)));
   }));
   app.post('/api/assets/:id/files/patch', wrap(async (req: Request, res: Response) => {
+    /* 契约校验一次，块内统一用 payload：同一请求重复解析只是浪费。 */
+    const payload = parseBody(patchFileSchema, req);
     const assetId = await requireAssetId(req);
-    ok(res, await generatePatch(assetId, String(body(req).path ?? ''), String(body(req).patch ?? '')));
+    ok(res, await generatePatch(assetId, String(payload.path ?? ''), String(payload.patch ?? '')));
   }));
 
   /* ---------------- 本地工作区仓库（代码库 = 克隆到本地） ---------------- */

@@ -84,6 +84,8 @@ import { PORT } from '../config';
 
 type Row = Record<string, unknown>;
 import { body, requireAssetId } from './helpers';
+import { parseBody } from '../http/validate';
+import { terminalExecuteSchema, terminalSessionPatchSchema } from '../../../shared/contracts';
 
 export function registerTerminalRoutes(app: Express): void {
   app.get('/api/assets/:id/terminal/sessions', wrap(async (req: Request, res: Response) => {
@@ -101,7 +103,7 @@ export function registerTerminalRoutes(app: Express): void {
   app.patch('/api/assets/:id/terminal/sessions/:sid', wrap(async (req: Request, res: Response) => {
     const assetId = await requireAssetId(req);
     const cwd = await ensureSession(assetId, String(req.params.sid));
-    ok(res, { id: req.params.sid, assetId, cwd: String(body(req).cwd ?? cwd), createdAt: nowIso() });
+    ok(res, { id: req.params.sid, assetId, cwd: String(parseBody(terminalSessionPatchSchema, req).cwd ?? cwd), createdAt: nowIso() });
   }));
   app.delete('/api/assets/:id/terminal/sessions/:sid', wrap(async (req: Request, res: Response) => {
     await requireAssetId(req);
@@ -109,10 +111,12 @@ export function registerTerminalRoutes(app: Express): void {
     ok(res, { closed: true });
   }));
   app.post('/api/assets/:id/terminal/execute', wrap(async (req: Request, res: Response) => {
+    /* 契约校验一次，块内统一用 payload：同一请求重复解析只是浪费。 */
+    const payload = parseBody(terminalExecuteSchema, req);
     const assetId = await requireAssetId(req);
     const result = await executeCommand(assetId, {
-      sessionId: String(body(req).sessionId ?? 'sess-1'),
-      command: String(body(req).command ?? ''),
+      sessionId: String(payload.sessionId ?? 'sess-1'),
+      command: String(payload.command ?? ''),
     }, await identity(req));
     ok(res, result);
   }));

@@ -85,6 +85,7 @@ import { PORT } from '../config';
 type Row = Record<string, unknown>;
 import { body, optionalId, assertWorkspace, workspaceGuard, requireRow, requireAssetId } from './helpers';
 import { parseBody } from '../http/validate';
+import { assetPatchSchema, assetSearchSchema, capabilityPatchSchema, cloneRepoSchema, credentialInputSchema, indexProgressSchema } from '../../../shared/contracts';
 import { assetCreateSchema } from '../../../shared/contracts';
 
 export function registerAssetRoutes(app: Express): void {
@@ -178,6 +179,8 @@ export function registerAssetRoutes(app: Express): void {
     });
   }));
   app.post('/api/assets/:id/index/progress', wrap(async (req: Request, res: Response) => {
+    /* 契约校验一次，块内统一用 payload：同一请求重复解析只是浪费。 */
+    const payload = parseBody(indexProgressSchema, req);
     const id = await requireAssetId(req);
     /* B15：代码资产触发真实索引管线（扫仓库 → 分块 → FTS5），不再模拟进度。 */
     const type = String((get<{ type: string }>('SELECT type FROM asset WHERE id = ?', id))?.type ?? '');
@@ -206,7 +209,7 @@ export function registerAssetRoutes(app: Express): void {
       return;
     }
     const current = Number((get<{ index_progress: number }>('SELECT index_progress FROM asset WHERE id = ?', id))?.index_progress ?? 0);
-    const to = typeof body(req).to === 'number' ? Number(body(req).to) : Math.min(100, current + Number(body(req).delta ?? 10));
+    const to = typeof payload.to === 'number' ? Number(payload.to) : Math.min(100, current + Number(payload.delta ?? 10));
     run('UPDATE asset SET index_progress = ?, status = ? WHERE id = ?', to, to >= 100 ? 'online' : 'indexing', id);
     ok(res, { indexProgress: to, status: to >= 100 ? 'online' : 'indexing' });
   }));
@@ -257,7 +260,7 @@ export function registerAssetRoutes(app: Express): void {
   }));
   app.patch('/api/assets/:id/capabilities/:capId', wrap(async (req: Request, res: Response) => {
     await requireAssetId(req);
-    const patch = body(req);
+    const patch = parseBody(capabilityPatchSchema, req);
     if (typeof patch.granted === 'boolean') {
       run('UPDATE asset_capability SET granted = ? WHERE id = ? AND asset_id = ?', patch.granted ? 1 : 0, req.params.capId, req.params.id);
     }
@@ -273,7 +276,7 @@ export function registerAssetRoutes(app: Express): void {
   }));
   app.post('/api/assets/:id/search', wrap(async (req: Request, res: Response) => {
     const assetId = await requireAssetId(req);
-    const query = String(body(req).query ?? queryString(req, 'q'));
+    const query = String(parseBody(assetSearchSchema, req).query ?? queryString(req, 'q'));
     /* B15：FTS5 全文检索（降级 LIKE），命中真实仓库分块。 */
     ok(res, searchIndex(assetId, query));
   }));
@@ -281,13 +284,15 @@ export function registerAssetRoutes(app: Express): void {
     ok(res, await credentialShape(await requireAssetId(req)));
   }));
   app.post('/api/assets/:id/credential/bind', wrap(async (req: Request, res: Response) => {
+    /* 契约校验一次，块内统一用 payload：同一请求重复解析只是浪费。 */
+    const payload = parseBody(credentialInputSchema, req);
     const assetId = await requireAssetId(req);
     /* B17：secret 走 IPC → safeStorage 加密落本机；DB 只存引用。 */
     ok(res, await bind(assetId, {
-      label: String(body(req).label ?? ''),
-      secret: String(body(req).secret ?? ''),
-      username: String(body(req).username ?? ''),
-      authMethod: String(body(req).method ?? ''),
+      label: String(payload.label ?? ''),
+      secret: String(payload.secret ?? ''),
+      username: String(payload.username ?? ''),
+      authMethod: String(payload.method ?? ''),
     }, await identity(req)));
   }));
   app.post('/api/assets/:id/credential/renew', wrap(async (req: Request, res: Response) => {
@@ -306,7 +311,7 @@ export function registerAssetRoutes(app: Express): void {
   }));
   app.patch('/api/assets/:id', wrap(async (req: Request, res: Response) => {
     const id = await requireAssetId(req);
-    const patch = body(req);
+    const patch = parseBody(assetPatchSchema, req);
     if (typeof patch.name === 'string') run('UPDATE asset SET name = ? WHERE id = ?', patch.name, id);
     if (typeof patch.env === 'string') run('UPDATE asset SET env = ? WHERE id = ?', patch.env, id);
     ok(res, { id, ...patch });
@@ -338,7 +343,7 @@ export function registerAssetRoutes(app: Express): void {
   app.post('/api/assets/:id/clone', wrap(async (req: Request, res: Response) => {
     const assetId = await requireAssetId(req);
     const who = await identity(req);
-    const payload = body(req);
+    const payload = parseBody(cloneRepoSchema, req);
     const url = String(payload.url ?? '').trim();
     /* 令牌优先用本次请求带的；没带就从已绑定的凭据里取 ——
      * 接入时录进去的令牌，之后在代码库详情页点「重新克隆」不必再手输一遍。 */

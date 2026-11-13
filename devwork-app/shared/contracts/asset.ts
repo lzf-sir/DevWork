@@ -47,3 +47,23 @@ export type AssetCreateInput = z.infer<typeof assetCreateSchema>;
 /** 更新资产：全部字段可选，语义与创建一致。 */
 export const assetPatchSchema = assetCreateSchema.partial();
 export type AssetPatchInput = z.infer<typeof assetPatchSchema>;
+
+/** 索引进度上报：to 为目标百分比，delta 为增量，二选一。 */
+export const indexProgressSchema = z.object({
+  to: z.number().min(0).max(100).optional(),
+  delta: z.number().optional(),
+});
+export type IndexProgressInput = z.infer<typeof indexProgressSchema>;
+
+/** 能力授权开关 / 审批方式。 */
+export const capabilityPatchSchema = z.object({
+  granted: z.boolean().optional(),
+  approval: z.string().max(32).optional(),
+});
+export type CapabilityPatchInput = z.infer<typeof capabilityPatchSchema>;
+
+/** 资产内检索（FTS + LIKE 双路，服务层合并）。 */
+export const assetSearchSchema = z.object({
+  query: z.string().max(500),
+});
+export type AssetSearchInput = z.infer<typeof assetSearchSchema>;

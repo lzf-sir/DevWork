@@ -45,3 +45,29 @@ export const llmModelsSchema = z.object({
   apiKey: z.string().max(8192).optional(),
 });
 export type LlmModelsInput = z.infer<typeof llmModelsSchema>;
+
+/** 敏感文件规则（整表替换）：id / pattern / description 三元组。 */
+export const sensitiveRulesSchema = z.object({
+  rules: z.array(z.object({
+    id: z.string().min(1).max(32),
+    pattern: z.string().min(1).max(200),
+    description: z.string().max(200),
+  })).max(500),
+});
+export type SensitiveRulesInput = z.infer<typeof sensitiveRulesSchema>;
+
+/** 权限探测：按动作 / 资产 / 风险等级推导「当前配置下会不会被拦」。 */
+export const permissionProbeSchema = z.object({
+  action: z.string().trim().min(1, 'action 不能为空').max(120),
+  actor: z.string().max(120).optional(),
+  assetId: z.string().max(64).optional(),
+  risk: z.string().max(32).optional(),
+});
+export type PermissionProbeInput = z.infer<typeof permissionProbeSchema>;
+
+/**
+ * 设置分区更新：键由分区自身定义（含 `perm.` 前缀的扁平键），
+ * 因此这里只能是开放记录 —— 严格列字段反而会把设置项写死在契约里。
+ */
+export const settingSectionPatchSchema = z.record(z.unknown());
+export type SettingSectionPatch = z.infer<typeof settingSectionPatchSchema>;

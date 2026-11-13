@@ -84,11 +84,13 @@ import { PORT } from '../config';
 
 type Row = Record<string, unknown>;
 import { body, requireRow, requireAssetId } from './helpers';
+import { parseBody } from '../http/validate';
+import { sqlExportSchema, sqlQuerySchema } from '../../../shared/contracts';
 
 export function registerSqlRoutes(app: Express): void {
   app.post('/api/assets/:id/sql/query', wrap(async (req: Request, res: Response) => {
     const assetId = await requireAssetId(req);
-    const payload = body(req);
+    const payload = parseBody(sqlQuerySchema, req);
     const options = (payload.options ?? {}) as Row;
     const result = await runSqlQuery(String(payload.sql ?? ''), {
       maxRows: typeof options.maxRows === 'number' ? Number(options.maxRows) : undefined,
@@ -152,7 +154,7 @@ export function registerSqlRoutes(app: Express): void {
    */
   app.post('/api/assets/:id/sql/export', wrap(async (req: Request, res: Response) => {
     const assetId = await requireAssetId(req);
-    const payload = body(req);
+    const payload = parseBody(sqlExportSchema, req);
     const format = String(payload.format ?? 'csv').toLowerCase();
     const result = await runSqlQuery(String(payload.sql ?? 'SELECT * FROM "order"'), {}, await identity(req), assetId);
     const columns = result.columnNames.length > 0 ? result.columnNames : result.columnsSimple;

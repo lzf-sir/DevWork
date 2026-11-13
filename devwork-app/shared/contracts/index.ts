@@ -6,4 +6,8 @@
  */
 export * from './asset';
 export * from './conversation';
+export * from './files';
 export * from './settings';
+export * from './sql';
+export * from './vocab';
+export * from './workspace';

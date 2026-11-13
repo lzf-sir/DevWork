@@ -84,13 +84,15 @@ import { PORT } from '../config';
 
 type Row = Record<string, unknown>;
 import { body } from './helpers';
+import { parseBody } from '../http/validate';
+import { browserNavSchema, browserPageSchema } from '../../../shared/contracts';
 
 export function registerBrowserRoutes(app: Express): void {
   app.get('/api/conversations/:id/browser', wrap(async (req: Request, res: Response) => {
     ok(res, await readBrowserState(String(req.params.id)));
   }));
   app.post('/api/conversations/:id/browser', wrap(async (req: Request, res: Response) => {
-    const normalized = normalizeBrowserUrl(body(req).url, { allowPrivate: true });
+    const normalized = normalizeBrowserUrl(parseBody(browserNavSchema, req).url, { allowPrivate: true });
     if (!normalized.ok) {
       fail(res, 'E_INVALID_URL', normalized.reason ?? '地址不合法', 422);
       return;
@@ -104,8 +106,10 @@ export function registerBrowserRoutes(app: Express): void {
     ok(res, await readBrowserPage(String(req.params.id)));
   }));
   app.post('/api/conversations/:id/browser/page', wrap(async (req: Request, res: Response) => {
-    const title = String(body(req).title ?? '').slice(0, 300);
-    const text = String(body(req).text ?? '').slice(0, 20000);
+    /* 契约校验一次，块内统一用 payload：同一请求重复解析只是浪费。 */
+    const payload = parseBody(browserPageSchema, req);
+    const title = String(payload.title ?? '').slice(0, 300);
+    const text = String(payload.text ?? '').slice(0, 20000);
     ok(res, await writeBrowserPage(String(req.params.id), title, text));
   }));
 

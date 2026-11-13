@@ -85,6 +85,7 @@ import { PORT } from '../config';
 type Row = Record<string, unknown>;
 import { body, requireRow } from './helpers';
 import { parseBody } from '../http/validate';
+import { permissionProbeSchema, sensitiveRulesSchema, settingSectionPatchSchema } from '../../../shared/contracts';
 import { llmKeySchema, llmProfileSchema, llmTestSchema, llmModelsSchema } from '../../../shared/contracts';
 
 export function registerSettingsRoutes(app: Express): void {
@@ -323,7 +324,9 @@ export function registerSettingsRoutes(app: Express): void {
   }));
   app.get('/api/sensitive-rules', (_req, res) => ok(res, SENSITIVE_RULES));
   app.put('/api/sensitive-rules', wrap(async (req: Request, res: Response) => {
-    const rules = Array.isArray(body(req).rules) ? (body(req).rules as Row[]) : SENSITIVE_RULES;
+    /* 契约校验一次，块内统一用 payload：同一请求重复解析只是浪费。 */
+    const payload = parseBody(sensitiveRulesSchema, req);
+    const rules = Array.isArray(payload.rules) ? (payload.rules as Row[]) : SENSITIVE_RULES;
     const privacy = await settingRaw('privacy');
     privacy.sensitiveRules = rules.map((r) => String(r.pattern ?? ''));
     run('UPDATE setting SET raw = ? WHERE section = ?', JSON.stringify(privacy), 'privacy');
@@ -335,7 +338,7 @@ export function registerSettingsRoutes(app: Express): void {
   app.get('/api/settings/effective-policy', async (_req, res) => ok(res, await effectivePolicy()));
   app.get('/api/effective-policy', async (_req, res) => ok(res, await effectivePolicy()));
   app.post('/api/settings/permission-probe', wrap(async (req: Request, res: Response) => {
-    const payload = body(req);
+    const payload = parseBody(permissionProbeSchema, req);
     const verdict = await probe({
       actor: payload.actor === 'agent' ? 'agent' : 'user',
       action: String(payload.action ?? 'read'),
@@ -382,7 +385,7 @@ export function registerSettingsRoutes(app: Express): void {
     const section = String(req.params.section);
     requireRow(get<Row>('SELECT section FROM setting WHERE section = ?', section), '设置分区');
     const current = await settingRaw(section);
-    const patch = body(req);
+    const patch = parseBody(settingSectionPatchSchema, req);
     Object.entries(patch).forEach(([key, value]) => {
       if (key.startsWith('perm.')) current[key.slice(5)] = value;
       else current[key] = value;

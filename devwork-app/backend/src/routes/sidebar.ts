@@ -84,6 +84,8 @@ import { PORT } from '../config';
 
 type Row = Record<string, unknown>;
 import { body, optionalId, requireRow } from './helpers';
+import { parseBody } from '../http/validate';
+import { folderCreateSchema, folderPatchSchema, folderReorderSchema, itemsMoveSchema } from '../../../shared/contracts';
 
 export function registerSidebarRoutes(app: Express): void {
   app.get('/api/sidebar', wrap(async (req: Request, res: Response) => {
@@ -110,7 +112,7 @@ export function registerSidebarRoutes(app: Express): void {
     })));
   }));
   app.post('/api/folders', wrap(async (req: Request, res: Response) => {
-    const payload = body(req);
+    const payload = parseBody(folderCreateSchema, req);
     const workspaceId = String(payload.workspaceId ?? 'w-ops');
     const kind = String(payload.kind ?? 'asset');
     const name = String(payload.name ?? '').trim() || '新建文件夹';
@@ -151,7 +153,9 @@ export function registerSidebarRoutes(app: Express): void {
     });
   }));
   app.post('/api/folders/reorder', wrap(async (req: Request, res: Response) => {
-    const ids = Array.isArray(body(req).ids) ? (body(req).ids as unknown[]) : [];
+    /* 契约校验一次，块内统一用 payload：同一请求重复解析只是浪费。 */
+    const payload = parseBody(folderReorderSchema, req);
+    const ids = Array.isArray(payload.ids) ? (payload.ids as unknown[]) : [];
     /* forEach + await 是发射后不管，顺序也不保证；排序是写操作，逐个 await 才是对的。 */
     for (const [index, value] of ids.entries()) {
       if (typeof value === 'string') run('UPDATE folder SET sort_order = ? WHERE id = ?', index, value);
@@ -161,7 +165,7 @@ export function registerSidebarRoutes(app: Express): void {
   app.patch('/api/folders/:id', wrap(async (req: Request, res: Response) => {
     const id = String(req.params.id);
     const existing = requireRow(get<Row>('SELECT * FROM folder WHERE id = ?', id), '文件夹');
-    const patch = body(req);
+    const patch = parseBody(folderPatchSchema, req);
     if (typeof patch.name === 'string') {
       const name = patch.name.trim();
       if (!name) throw new ApiFailure('E_VALIDATION', '文件夹名称不能为空');
@@ -219,7 +223,7 @@ export function registerSidebarRoutes(app: Express): void {
     ok(res, { movedToParentId, affected: affectedAssets + affectedConvs });
   }));
   app.post('/api/items/move', wrap(async (req: Request, res: Response) => {
-    const payload = body(req);
+    const payload = parseBody(itemsMoveSchema, req);
     const table = payload.kind === 'conversation' ? 'conversation' : 'asset';
     const targetFolderId = optionalId(payload.targetFolderId);
     const itemId = String(payload.itemId ?? '');
