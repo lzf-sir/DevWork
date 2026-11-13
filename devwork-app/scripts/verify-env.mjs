@@ -9,7 +9,9 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const serverRoot = path.resolve(here, '..');
+/** 本文件位于 scripts/，向上两级即 devwork-app 根；server/ 由根拼出。 */
+const root = path.resolve(here, '..');
+const serverRoot = path.join(root, 'server');
 const results = [];
 let failed = false;
 

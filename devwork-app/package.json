@@ -5,7 +5,7 @@
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
-    "check:env": "node server/scripts/verify-env.mjs",
+    "check:env": "node scripts/verify-env.mjs",
     "dev": "node scripts/dev-supervisor.mjs",
     "dev:server": "tsx watch server/src/index.ts",
     "dev:client": "vite --host 127.0.0.1 --port 5173",
