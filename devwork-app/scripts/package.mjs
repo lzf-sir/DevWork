@@ -183,11 +183,8 @@ function stageRuntime() {
   removeDir(STAGE);
   fs.mkdirSync(serverStage, { recursive: true });
 
-  /* 服务端源码：src（含 schema.sql 等非 TS 资源）与 scripts 都要带上。 */
+  /* 服务端源码：src（含 schema.sql 等非 TS 资源）。 */
   copyDir(path.join(ROOT, 'server', 'src'), path.join(serverStage, 'src'));
-  if (fs.existsSync(path.join(ROOT, 'server', 'scripts'))) {
-    copyDir(path.join(ROOT, 'server', 'scripts'), path.join(serverStage, 'scripts'));
-  }
 
   /* 模块类型声明：服务端是 ESM，打包后这个目录没有上层 package.json 兜底。 */
   fs.writeFileSync(

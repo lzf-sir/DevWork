@@ -36,7 +36,7 @@ preflight(ROOT, { requireNode: 22 });
 
 /* ② 后端环境门禁：node:sqlite / WAL / 只读连接 —— 这是项目自己的 verify-env */
 step('检查后端运行环境…');
-const envCheck = spawnSync(process.execPath, [path.join(ROOT, 'server', 'scripts', 'verify-env.mjs')], {
+const envCheck = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'verify-env.mjs')], {
   cwd: ROOT,
   stdio: 'inherit',
 });
