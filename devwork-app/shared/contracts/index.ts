@@ -6,3 +6,4 @@
  */
 export * from './asset';
 export * from './conversation';
+export * from './settings';

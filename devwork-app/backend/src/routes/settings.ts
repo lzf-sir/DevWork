@@ -84,14 +84,16 @@ import { PORT } from '../config';
 
 type Row = Record<string, unknown>;
 import { body, requireRow } from './helpers';
+import { parseBody } from '../http/validate';
+import { llmKeySchema, llmProfileSchema, llmTestSchema, llmModelsSchema } from '../../../shared/contracts';
 
 export function registerSettingsRoutes(app: Express): void {
   app.get('/api/settings/llm-key', wrap(async (_req: Request, res: Response) => {
     ok(res, await llmKeyStatus());
   }));
   app.post('/api/settings/llm-key', wrap(async (req: Request, res: Response) => {
-    const secret = String(body(req).secret ?? '');
-    if (!secret.trim()) throw new ApiFailure('E_VALIDATION', 'secret 不能为空');
+    /* 契约校验：secret 必填且非空白（trim 由 schema 完成）。 */
+    const { secret } = parseBody(llmKeySchema, req);
     const who = await identity(req);
     const result = await setLlmKey(secret);
     writeAudit({
@@ -130,7 +132,7 @@ export function registerSettingsRoutes(app: Express): void {
   /* 老端点保留：语义变成"更新当前生效的那条档案"（还没有档案就建第一条）。 */
   app.put('/api/settings/llm-config', wrap(async (req: Request, res: Response) => {
     const who = await identity(req);
-    const payload = body(req);
+    const payload = parseBody(llmProfileSchema, req);
     const list = await llmProfileList();
     const activeId = await llmActiveProfileId();
     const target = list.find((p) => p.id === activeId) ?? list[0];
@@ -169,7 +171,7 @@ export function registerSettingsRoutes(app: Express): void {
   /** 新增一条模型档案。第一条自动成为当前生效的。 */
   app.post('/api/settings/llm-profiles', wrap(async (req: Request, res: Response) => {
     const who = await identity(req);
-    const payload = body(req);
+    const payload = parseBody(llmProfileSchema, req);
     const provider = String(payload.provider ?? 'custom').trim() || 'custom';
     const preset = LLM_PRESETS.find((p) => p.id === provider);
     const baseUrl = String(payload.baseUrl ?? '').trim().replace(/\/+$/, '') || preset?.baseUrl || '';
@@ -205,7 +207,7 @@ export function registerSettingsRoutes(app: Express): void {
     const list = await llmProfileList();
     const index = list.findIndex((p) => p.id === id);
     if (index < 0) throw new ApiFailure('E_NOT_FOUND', `模型档案不存在：${id}`);
-    const payload = body(req);
+    const payload = parseBody(llmProfileSchema, req);
     const before = list[index];
     const provider = typeof payload.provider === 'string' ? payload.provider.trim() : before.provider;
     const preset = LLM_PRESETS.find((p) => p.id === provider);
@@ -273,7 +275,7 @@ export function registerSettingsRoutes(app: Express): void {
 
   app.post('/api/settings/llm-config/test', wrap(async (req: Request, res: Response) => {
     const who = await identity(req);
-    const payload = body(req);
+    const payload = parseBody(llmTestSchema, req);
     const cfg = await llmRuntimeConfig();
     const baseUrl = String(payload.baseUrl ?? '').trim() || cfg.baseUrl;
     const model = String(payload.model ?? '').trim() || cfg.model;
@@ -301,7 +303,7 @@ export function registerSettingsRoutes(app: Express): void {
    * 模型名写死在预设里会过时，列表以端点为准；预设静态数组只作拉取失败时的兜底。 */
   app.post('/api/settings/llm-models', wrap(async (req: Request, res: Response) => {
     const who = await identity(req);
-    const payload = body(req);
+    const payload = parseBody(llmModelsSchema, req);
     const cfg = await llmRuntimeConfig();
     const baseUrl = String(payload.baseUrl ?? '').trim() || cfg.baseUrl;
     const result = await fetchLlmModels({

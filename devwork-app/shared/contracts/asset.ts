@@ -8,9 +8,10 @@
  */
 import { z } from 'zod';
 
-/** 资产类型枚举，与 backend/src/config/tool-catalog.ts 的 AssetType 严格对齐。 */
-export const ASSET_TYPES = ['code', 'db', 'server', 'kb', 'log', 'api'] as const;
-export type AssetType = (typeof ASSET_TYPES)[number];
+/* 词表与守卫在 vocab.ts（零依赖）：前端只需要它们时不该被迫引入 zod。 */
+export { ASSET_TYPES, isAssetType } from './vocab';
+export type { AssetType } from './vocab';
+import { ASSET_TYPES } from './vocab';
 
 /** 凭据载荷：秘密值只在当次动作里出现，落库前由 safeStorage 加密。 */
 export const credentialInputSchema = z.object({

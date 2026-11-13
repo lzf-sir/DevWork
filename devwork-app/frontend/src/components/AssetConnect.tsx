@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { api } from '../api/client';
+import { isAssetType, type AssetType } from '../../../shared/contracts/vocab';
 import { useStore } from '../store';
 import {
   ASSET_TYPES,
@@ -39,7 +40,7 @@ const ENVS = ['prod', 'staging', 'dev'];
 
 export default function AssetConnect({ onClose }: { onClose: () => void }): React.ReactElement {
   const { state, addToast, reloadSidebar } = useStore();
-  const [type, setType] = useState<string>('db');
+  const [type, setType] = useState<AssetType>('db');
   const [name, setName] = useState<string>('');
   const [env, setEnv] = useState<string>('staging');
   const [subtitle, setSubtitle] = useState<string>('');
@@ -97,6 +98,9 @@ export default function AssetConnect({ onClose }: { onClose: () => void }): Reac
 
   /** 换类型：整套类型专属字段与鉴权字段重置，避免上一类型的残留值混进新资产。 */
   const pickType = (next: string): void => {
+    /* <select> 的 value 是字符串：边界处收窄，非法值直接忽略，
+     * 不静默落进一个后端 schema 会拒绝的类型。 */
+    if (!isAssetType(next)) return;
     setType(next);
     setValues(defaultValues(specOf(next)));
     setFieldError('');

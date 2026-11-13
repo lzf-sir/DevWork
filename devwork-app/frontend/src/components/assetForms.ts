@@ -30,6 +30,8 @@
  * 每种类型的 configNote 都如实写明这一点，避免用户以为填了就等于连上了。
  */
 
+import type { AssetType } from '../../../shared/contracts/vocab';
+
 export type FieldType = 'text' | 'number' | 'select' | 'textarea' | 'secret';
 
 export interface FieldOption {
@@ -120,7 +122,9 @@ export interface AuthPayload {
 }
 
 export interface AssetTypeSpec {
-  id: string;
+  /* 收紧为资产类型枚举：规格表里写错类型（如 'database'）会在编译期暴露，
+   * 而不是等到提交后被后端 schema 拒绝。 */
+  id: AssetType;
   label: string;
   icon: string;
   desc: string;

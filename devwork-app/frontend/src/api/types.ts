@@ -143,27 +143,10 @@ export interface AssetCredentialInput {
   secret?: string;
 }
 
-export interface AssetInput {
-  workspaceId: string;
-  type: string;
-  name: string;
-  env?: string;
-  subtitle?: string;
-  folderId?: string | null;
-  /** 连接串 / 仓库路径（兼容串），服务端落 asset.config.endpoint。 */
-  endpoint?: string;
-  /**
-   * 按资产类型的结构化配置（由类型注册表生成）。
-   * 服务端按类型白名单清洗后落 asset.config：未知键丢弃、敏感键拒绝、值长度有界。
-   * 敏感字段（访问令牌等）不经过这里 —— 它们只用于当次动作，不落库。
-   */
-  config?: Record<string, unknown>;
-  /**
-   * 接入时一并绑定的凭据（账号 / 口令 / 令牌 / 私钥）。
-   * 服务端走凭据通道：safeStorage 加密存本机、库里只留引用，绝不写进 asset.config。
-   */
-  credential?: AssetCredentialInput;
-}
+/* 写入载荷的真源在 shared/contracts（zod 推导）：type 收紧为资产类型枚举，
+ * 传错类型现在会变成编译错误，而不是等后端 400。 */
+import type { AssetCreateInput as AssetCreateInputContract } from '../../../shared/contracts';
+export type AssetInput = AssetCreateInputContract;
 
 export interface AssetDetail extends Asset {
   subtitle: string;
