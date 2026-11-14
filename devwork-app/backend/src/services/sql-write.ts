@@ -17,6 +17,7 @@ import path from 'node:path';
 import { DEMO_DB_PATH, DATA_DIR } from '../config';
 import { checksumFile } from '../db/database';
 import { ApiFailure } from '../http/core';
+import { firstWordOf, hasTopLevelSemicolon, scanSql } from './sql-scan';
 
 const DDL_KEYWORDS = [
   'DROP', 'CREATE', 'ALTER', 'TRUNCATE', 'ATTACH', 'DETACH', 'PRAGMA',
@@ -88,17 +89,20 @@ function runWriteWorker(sql: string, timeoutMs: number): Promise<WriteWorkerRepl
   });
 }
 
-function stripComments(sql: string): string {
-  return sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
-}
-
-/** 写预检：单条 DML。首关键字判定顺序：DDL → 精确报 DDL 拒绝；非 DML → 拒绝。 */
+/** 写预检：单条 DML。首关键字判定顺序：DDL → 精确报 DDL 拒绝；非 DML → 拒绝。
+ *
+ * 判定只看代码区（字面量与注释里的内容是数据），执行用原文 ——
+ * 早期版本用正则剥注释，把 `VALUES('<注释符>x<注释符>')` 里的内容吃掉了，
+ * 且把剥完的结果直接当 SQL 执行，写进去的数据被静默篡改。
+ */
 export function precheckDml(raw: string): string {
   const statement = raw.trim();
   if (statement === '') throw new ApiFailure('E_SQL_REJECTED', 'SQL 不能为空');
-  const cleaned = stripComments(statement).trim().replace(/;+\s*$/, '').trim();
-  if (/;/.test(cleaned)) throw new ApiFailure('E_SQL_REJECTED', '写通道禁止多语句（单条 DML）');
-  const firstWord = (cleaned.match(/^\s*([A-Za-z]+)/)?.[1] ?? '').toUpperCase();
+  const scan = scanSql(statement);
+  if (hasTopLevelSemicolon(scan.codeMask.replace(/;+\s*$/, ''))) {
+    throw new ApiFailure('E_SQL_REJECTED', '写通道禁止多语句（单条 DML）');
+  }
+  const firstWord = firstWordOf(scan.codeMask);
   if (DDL_KEYWORDS.includes(firstWord)) {
     throw new ApiFailure('E_SQL_REJECTED', `写通道禁止 DDL：检测到 ${firstWord}`);
   }
@@ -106,7 +110,7 @@ export function precheckDml(raw: string): string {
     throw new ApiFailure('E_SQL_REJECTED', `写通道仅允许 INSERT / UPDATE / DELETE（收到 ${firstWord || '空'}）`);
   }
   /* 语句体内出现 DDL 关键字（如列名/字符串里带 create）不再误杀——首关键字已判定为 DML。 */
-  return cleaned;
+  return scan.execStatement;
 }
 
 /** 备份 demo 库（整文件拷贝）。 */

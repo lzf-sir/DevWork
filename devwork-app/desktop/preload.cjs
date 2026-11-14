@@ -19,6 +19,14 @@ contextBridge.exposeInMainWorld('desktop', {
     return () => ipcRenderer.removeListener('win:maximize-changed', listener);
   },
   platform: () => ipcRenderer.invoke('app:platform'),
+  /**
+   * 待人状态推给桌面壳：窗口标题前缀 + 任务栏/Dock 徽标 + 托盘提示。
+   *
+   * 由渲染进程单向推送（主进程不反查）：待人清单的口径在服务端，
+   * 主进程再拉一次就会出现两套账 —— 界面显示 3、任务栏显示 4。
+   * payload: { count: number, level: 'answer' | 'stuck' | 'review' }
+   */
+  setAttention: (payload) => ipcRenderer.invoke('win:attention', payload),
   versions: () => ipcRenderer.invoke('app:versions'),
   apiBase: () => ipcRenderer.invoke('app:api-base'),
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),

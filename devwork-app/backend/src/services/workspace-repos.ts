@@ -19,6 +19,7 @@ import { SANDBOX_DIR } from '../config';
 import { get, run, nowIso } from '../db/database';
 import { REPO_ROOT } from '../sandbox/bootstrap';
 import { ApiFailure } from '../http/core';
+import { repoRootOverride, isolationRequired } from './exec-context';
 
 /** 所有工作区的本地根。 */
 export const WORKSPACES_ROOT = path.join(SANDBOX_DIR, 'workspaces');
@@ -98,8 +99,26 @@ export function assetWorkspaceId(assetId: string): string {
  * 1. 有克隆记录 → <WORKSPACES_ROOT>/<localPath>，并校验不越出所属工作区目录；
  * 2. 记录存在但目录被删 → 如实报错（不假装还有仓库）；
  * 3. 没有克隆记录 → 回落沙箱演示仓库（历史种子资产的兼容路径）。
+ *
+ * 唯一的例外：**本工单要求隔离的写目标**。它拿不到隔离根时直接报错，
+ * 绝不回落演示仓库 —— 回落意味着两张工单在同一个目录里改同一个文件，
+ * 而且双方都不会报错。这比停下来严重得多。
  */
 export function resolveRepoRoot(assetId: string): string {
+  /* 工单执行期内优先用这张工单自己的工作树。
+   * 这是「隔离」真正生效的地方 —— 不在这里覆盖，独立目录就只是个空壳。 */
+  const override = repoRootOverride(assetId);
+  if (override) return override;
+
+  /* 本单声明了「这个资产必须隔离」，却拿不到隔离根：拒绝降级。 */
+  if (isolationRequired(assetId)) {
+    throw new ApiFailure(
+      'E_PERMISSION_DENIED',
+      `资产 ${assetId} 在本工单内必须落在隔离工作树上，但没有隔离根：拒绝回落共享仓库`
+      + '（降级写会造成工单之间静默覆盖）',
+    );
+  }
+
   const config = repoConfigOf(assetId);
   const workspaceId = assetWorkspaceId(assetId);
   if (!config.localPath) return REPO_ROOT;

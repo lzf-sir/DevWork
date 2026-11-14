@@ -22,6 +22,10 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.env.SMOKE_PORT ?? 3011);
 const BASE = `http://127.0.0.1:${PORT}`;
+/* 可选阶段过滤：`node tests/run-smoke.mjs shadow` 只跑影子链路。
+ * 用位置参数而不是环境变量，是为了 Windows 上 `npm run` 不必依赖 cross-env。 */
+const ONLY = (process.argv[2] ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+const want = (stage) => ONLY.length === 0 || ONLY.includes(stage);
 const RUN_DIR = path.join(ROOT, 'tmp', `qa-run-${Date.now()}`);
 const DATA_DIR = path.join(RUN_DIR, 'data');
 const SANDBOX_DIR = path.join(RUN_DIR, 'sandbox');
@@ -111,6 +115,56 @@ function runAssetForms() {
   });
 }
 
+/** P2 工单链路（授权 → 建单 → 派工 → 报告 → 停止）。 */
+function runTickets() {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(ROOT, 'tests', 'tickets.mjs')], {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        DEVWORK_BASE: BASE,
+        DEVWORK_DATA_DIR: DATA_DIR,
+        DEVWORK_SANDBOX_DIR: SANDBOX_DIR,
+      },
+      stdio: 'inherit',
+    });
+    child.on('exit', (code) => resolve(code ?? 1));
+  });
+}
+
+/** 任务清单 + 上下文压缩（原位更新 / 进度推导 / 折叠摘要 / 用量回退）。 */
+function runContext() {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(ROOT, 'tests', 'context.mjs')], {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        DEVWORK_BASE: BASE,
+        DEVWORK_DATA_DIR: DATA_DIR,
+        DEVWORK_SANDBOX_DIR: SANDBOX_DIR,
+      },
+      stdio: 'inherit',
+    });
+    child.on('exit', (code) => resolve(code ?? 1));
+  });
+}
+
+/** P1 影子链路（Gate 各档位 + 频控 + 幂等 + 策略开关 + 统计口径）。 */
+function runShadow() {  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(ROOT, 'tests', 'shadow.mjs')], {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        DEVWORK_BASE: BASE,
+        DEVWORK_DATA_DIR: DATA_DIR,
+        DEVWORK_SANDBOX_DIR: SANDBOX_DIR,
+      },
+      stdio: 'inherit',
+    });
+    child.on('exit', (code) => resolve(code ?? 1));
+  });
+}
+
 async function main() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.mkdirSync(SANDBOX_DIR, { recursive: true });
@@ -154,19 +208,25 @@ async function main() {
       process.stderr.write(serverLog.slice(-4000));
       exitCode = 1;
     } else {
-      log('服务就绪，开始跑冒烟用例');
-      exitCode = await runSmoke();
-      if (exitCode === 0) {
-        log('冒烟通过，继续跑仓库克隆链路用例');
-        exitCode = await runRepoClone();
-      }
-      if (exitCode === 0) {
-        log('仓库克隆通过，继续跑数据库浏览能力用例');
-        exitCode = await runDbBrowse();
-      }
-      if (exitCode === 0) {
-        log('数据库浏览通过，继续跑资产接入表单用例');
-        exitCode = await runAssetForms();
+      log(`服务就绪，开始跑用例${ONLY.length > 0 ? `（仅 ${ONLY.join(',')}）` : ''}`);
+      const stages = [
+        { name: 'smoke', label: '冒烟用例', run: runSmoke },
+        { name: 'repo', label: '仓库克隆链路', run: runRepoClone },
+        { name: 'db', label: '数据库浏览能力', run: runDbBrowse },
+        { name: 'asset', label: '资产接入表单', run: runAssetForms },
+        { name: 'context', label: '清单与上下文压缩', run: runContext },
+        { name: 'shadow', label: '影子链路', run: runShadow },
+        { name: 'tickets', label: '工单链路', run: runTickets },
+      ];
+      for (const stage of stages) {
+        if (!want(stage.name)) continue;
+        log(`${stage.label} 开始`);
+        exitCode = await stage.run();
+        if (exitCode !== 0) {
+          log(`${stage.label} 失败（exit=${exitCode}），后续阶段跳过`);
+          break;
+        }
+        log(`${stage.label} 通过`);
       }
     }
   } finally {

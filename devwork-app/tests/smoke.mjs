@@ -13,6 +13,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withWorkspace } from './lib/workspace.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BASE = process.env.DEVWORK_BASE ?? 'http://127.0.0.1:3001';
@@ -44,6 +45,21 @@ function check(group, name, expected, actual, ok, note = '') {
   }
 }
 
+/**
+ * 资产 → 所属工作区。
+ *
+ * 后端工作区守卫收紧成「缺省即拒」后，资产级请求必须显式带 workspaceId。
+ * 这里登记已知资产的归属，让 call() 自动补上；新建物资默认 w-ops
+ * （本文件里的 POST /assets 都建在 w-ops）。
+ */
+const ASSET_WORKSPACE = new Map([
+  ['a-order-service', 'w-ops'],
+  ['a-order-db-prod', 'w-ops'],
+  ['a-order-api', 'w-ops'],
+  ['a-kb', 'w-ops'],
+  ['a-hive-meta', 'w-data'],
+]);
+
 async function call(method, urlPath, body, headers = {}, timeoutMs = 20000) {
   const init = {
     method,
@@ -51,8 +67,10 @@ async function call(method, urlPath, body, headers = {}, timeoutMs = 20000) {
     signal: AbortSignal.timeout(timeoutMs),
   };
   if (body !== undefined) init.body = typeof body === 'string' ? body : JSON.stringify(body);
+  /* 资产级请求补工作区；URL 里已显式写了的不覆盖（B 组跨工作区用例靠它）。 */
+  const target = withWorkspace(urlPath, (assetId) => ASSET_WORKSPACE.get(assetId) ?? 'w-ops');
   try {
-    const res = await fetch(API + urlPath, init);
+    const res = await fetch(API + target, init);
     const text = await res.text();
     let json = null;
     try { json = JSON.parse(text); } catch { /* 非 JSON 响应 */ }
@@ -135,6 +153,15 @@ async function main() {
     const ok = r.status === status && (code === null || codeOf(r) === code);
     check('B', name, `HTTP ${status}${code ? ' + ' + code : ' + ok:true'}`,
       `HTTP ${r.status}, code=${codeOf(r)}, ok=${r.json?.ok}`, ok);
+  }
+  /* 缺省即拒：不带 workspaceId 的资产级请求必须被拒，不能当放行。
+   * 这一条直测守卫本身 —— call() 会自动补 workspaceId，所以走裸 fetch。 */
+  {
+    const res = await fetch(`${API}/assets/a-order-service`);
+    const json = await res.json().catch(() => ({}));
+    check('B', '资产请求缺 workspaceId 即拒（缺省不放行）', 'HTTP 409 + E_WORKSPACE_MISMATCH',
+      `HTTP ${res.status}, code=${json?.error?.code}`,
+      res.status === 409 && json?.error?.code === 'E_WORKSPACE_MISMATCH');
   }
 
   /* ------------------------------------------------------------------ */

@@ -86,3 +86,18 @@ export const approvalRollbackSchema = z.object({
   conversationId: z.string().min(1).max(64).optional(),
 });
 export type ApprovalRollbackInput = z.infer<typeof approvalRollbackSchema>;
+
+/**
+ * 手动压缩上下文。
+ *
+ * 全字段可选：不传就是"按当前模型窗口的默认水位保留最近一段"。
+ * keepShare 限制在 0.1~0.5 —— 保留比例太大等于没压缩，太小等于让模型失忆，
+ * 两个极端都不该由调用方随手设。
+ */
+export const compactContextSchema = z.object({
+  /** 本次压缩使用的模型（决定窗口与摘要由谁提炼）；缺省跟随全局配置。 */
+  model: z.string().max(120).optional(),
+  /** 保留最近内容占窗口的比例。 */
+  keepShare: z.number().min(0.1).max(0.5).optional(),
+});
+export type CompactContextInput = z.infer<typeof compactContextSchema>;

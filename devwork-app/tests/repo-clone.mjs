@@ -18,6 +18,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { adminCookie } from './lib/session.mjs';
+import { withWorkspace } from './lib/workspace.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BASE = process.env.DEVWORK_BASE ?? 'http://127.0.0.1:3001';
@@ -42,6 +43,14 @@ function check(group, name, expected, actual, ok, note = '') {
   }
 }
 
+/**
+ * 资产 → 所属工作区。
+ *
+ * 工作区 id 是运行时新建的（不是固定值），资产建出来后登记到这里，
+ * call() 据此给资产级请求补上 workspaceId —— 后端守卫缺省即拒。
+ */
+const ASSET_WORKSPACE = new Map();
+
 async function call(method, urlPath, body, headers = {}, timeoutMs = 120000) {
   const init = {
     method,
@@ -49,7 +58,8 @@ async function call(method, urlPath, body, headers = {}, timeoutMs = 120000) {
     signal: AbortSignal.timeout(timeoutMs),
   };
   if (body !== undefined) init.body = typeof body === 'string' ? body : JSON.stringify(body);
-  const res = await fetch(API + urlPath, init);
+  const target = withWorkspace(urlPath, (assetId) => ASSET_WORKSPACE.get(assetId) ?? '');
+  const res = await fetch(API + target, init);
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch { /* 非 JSON 响应按原文处理 */ }
@@ -110,6 +120,9 @@ async function main() {
   const idA = assetA.json?.data?.id ?? '';
   const idB = assetB.json?.data?.id ?? '';
   check('准备', '创建两个 code 资产', '各返回资产 id', `A=${idA} B=${idB}`, Boolean(idA && idB));
+  /* 登记归属：后续资产级请求据此带对 workspaceId（后端守卫缺省即拒）。 */
+  if (idA) ASSET_WORKSPACE.set(idA, wsA);
+  if (idB) ASSET_WORKSPACE.set(idB, wsB);
 
   /* ---- 2. 真实 clone ---- */
   const cloneA = await call('POST', `/assets/${idA}/clone`, { url: srcA.url, depth: 1 });

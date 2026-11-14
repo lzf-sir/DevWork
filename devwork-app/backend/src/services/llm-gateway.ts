@@ -25,6 +25,8 @@ export type GatewayKind = 'mock' | 'openai-compatible';
 export type AgentEvent =
   | { type: 'routing'; intent: string; mountedAssets: string[]; model: string; degraded?: boolean }
   | { type: 'plan'; intent: string; steps: { goal: string; durationMs: number }[]; degraded?: boolean }
+  /** 任务清单：长任务的每一步状态。同一会话反复出现时前端按 id 原位更新同一张卡。 */
+  | { type: 'todo'; items: { id?: string; title: string; status?: string; note?: string }[]; degraded?: boolean }
   | { type: 'text'; content: string }
   | { type: 'text_delta'; content: string }
   /** level=warn 用于降级说明（未接入模型 / 模型调用失败），UI 需常驻可见。 */
@@ -76,6 +78,9 @@ export interface GatewayContext {
   toolFace?: { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }[];
   /** 真实工具执行器（由 conversation 服务提供，含权限内核裁决 + 凭据检查）。 */
   executeTool?: (toolName: string, argsJson: string) => Promise<ToolExecutionResult>;
+  /** 当前任务清单的一行式快照（todo.ts 的 todoPromptOf）—— 进系统提示，
+   *  让模型在长任务里始终看得见自己排到第几步，而不是靠"记忆"。 */
+  todoText?: string;
 }
 
 export interface CitationSeed {
@@ -103,6 +108,13 @@ export interface LlmGateway {
   /** 实际模型名；未接入模型时明确写「未接入模型」，不能编一个型号糊上去。 */
   readonly modelName: string;
   generate(ctx: GatewayContext): AsyncIterable<AgentEvent>;
+  /**
+   * 上下文压缩用的一次性摘要（非流式）。
+   *
+   * 只有接了真模型才实现它 —— 没模型时 compress 走规则提炼（抽取用户诉求与已有结论），
+   * 并在摘要卡上如实标注 source='rule'，不冒充模型总结。
+   */
+  summarize?(transcript: string, maxChars: number): Promise<{ text: string; source: 'model'; model: string }>;
 }
 
 export function detectIntent(content: string): string {
@@ -283,6 +295,13 @@ export class MockGateway implements LlmGateway {
 
     yield { type: 'routing', intent, mountedAssets: ['a-order-db-prod', 'a-kb'], model: '未接入模型', degraded: true };
     yield { type: 'plan', intent, steps: template.steps, degraded: true };
+    /* 演示轨迹也给一张清单卡：让人先看清"长任务长什么样"。
+     * 全部 pending —— 这几步并没有被执行过，标 done 就是假装。 */
+    yield {
+      type: 'todo',
+      items: template.steps.map((step, index) => ({ id: `t${index + 1}`, title: step.goal, status: 'pending' })),
+      degraded: true,
+    };
     yield { type: 'text', content: template.text };
 
     const citations: CitationSeed[] = [];
@@ -377,11 +396,17 @@ export class OpenAiCompatibleGateway implements LlmGateway {
       '- 只读工具直接调用；写工具（code_edit / db_query_write / srv_exec / fs_write_file）表达意图即可，',
       '  它们会生成审批卡，由用户批准后按 precheck→执行→校验→回滚 管线真执行，你不要虚构执行结果；',
       '- 服务器运维操作只能用 srv_exec 表达意图（action 参数），模板库不支持的操作要明说不支持；',
+      /* 长任务的两条纪律：先拆步、每步落地后回报。没有这条，10 步之后模型就忘了原始目标，
+       * 而用户看到的只是一堆工具行，不知道现在做到哪了。 */
+      '- 长任务（预计超过 3 个动作）先调用 todo_write 拆成 3~7 步，再逐步执行；',
+      '  每完成一步立刻调用 todo_write 回传完整清单并把该步标 done；卡住就标 blocked 并写 note，',
+      '  不要为了"看起来完成"把没做的步骤标 done，也不要在一次调用里把所有步骤一次性标完成；',
       '- 结论必须给出置信度，引用检索到的证据时用 [1][2] 角标标注；',
       '- 检索结果为空时直接说"没有找到"，不要编造文件路径或行号。',
       `- 当前只读模式：${ctx.readOnlyMode ? '开启' : '关闭'}；挂载资产：${ctx.assetIds.join(', ') || '默认（生产库+运营知识库)'}。`,
+      ctx.todoText ? `\n${ctx.todoText}` : '',
       '回答用简体中文，尽量简短、分点。',
-    ].join('\n');
+    ].filter(Boolean).join('\n');
   }
 
   private toolsSpec(ctx: GatewayContext) {
@@ -425,6 +450,42 @@ export class OpenAiCompatibleGateway implements LlmGateway {
         },
       },
     ];
+  }
+
+  /**
+   * 上下文压缩用的摘要（一次性、非流式）。
+   * 失败直接抛：调用方会退回规则提炼并在摘要卡上标 source='rule'，
+   * 把「模型没答上来」写成一张空摘要卡才是最坏的结果。
+   */
+  async summarize(transcript: string, maxChars = 900): Promise<{ text: string; source: 'model'; model: string }> {
+    const response = await fetch(`${this.baseUrl.replace(/\/$/, '')}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` },
+      body: JSON.stringify({
+        model: this.model,
+        messages: [
+          {
+            role: 'system',
+            content: [
+              '你在压缩一段 Agent 与用户的对话上下文，供后续轮次继续工作。',
+              '只保留仍然有用的信息：用户目标、已确认的结论、已完成的动作、未决问题与约束条件。',
+              '不要复述工具调用的过程细节，不要编造没有发生的结论。',
+              '输出简洁的中文要点（每行一条），不写寒暄。',
+            ].join(''),
+          },
+          { role: 'user', content: `把下面这段对话压缩成不超过 ${maxChars} 字的中文要点：\n\n${transcript}` },
+        ],
+        temperature: 0.2,
+        max_tokens: Math.max(200, Math.min(1200, Math.round(maxChars / 1.2))),
+        stream: false,
+      }),
+      signal: AbortSignal.timeout(60000),
+    });
+    if (!response.ok) throw new Error(`llm summarize http ${response.status}`);
+    const data = (await response.json()) as { choices?: { message?: { content?: string } }[] };
+    const text = String(data.choices?.[0]?.message?.content ?? '').trim();
+    if (!text) throw new Error('llm summarize 空回复');
+    return { text: text.slice(0, maxChars), source: 'model', model: this.model };
   }
 
   async *generate(ctx: GatewayContext): AsyncIterable<AgentEvent> {

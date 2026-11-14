@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { api } from '../api/client';
+import { useAssetTarget } from '../hooks/useAssetTarget';
 import type { AssetDetail, KbDocument, KbDocumentList, SearchHit } from '../api/client';
 import { DetailHeader, DetailTabs, GearSvg, MetricGrid, Pill } from '../components/ui';
 import { BookIcon, DotsIcon } from '../components/icons';
@@ -32,31 +33,37 @@ export default function KbDetail(): React.ReactElement {
   const [reindexing, setReindexing] = useState<boolean>(false);
   const readerRef = useRef<HTMLDivElement>(null);
 
+  /* 当前工作区里的知识库资产：不再写死 a-kb（那是 w-ops 的演示资产）。 */
+  const kbAsset = useAssetTarget('kb');
+  const assetId = kbAsset?.id ?? '';
+
   const loadDocuments = useCallback((preferPath?: string) => {
-    void api.listDocuments('a-kb').then((envelope) => {
+    if (!assetId) return;
+    void api.listDocuments(assetId).then((envelope) => {
       if (!envelope.ok || !Array.isArray(envelope.data.files)) return;
       setDocs(envelope.data);
       const first = envelope.data.files.find((file) => file.path === preferPath) ?? envelope.data.files[0];
       setActivePath((prev) => preferPath ?? (prev || first?.path || ''));
     });
-  }, []);
+  }, [assetId]);
 
   useEffect(() => {
+    if (!assetId) return;
     let alive = true;
-    void api.getAsset('a-kb').then((envelope) => {
+    void api.getAsset(assetId).then((envelope) => {
       if (alive && envelope.ok) setAsset(envelope.data);
     });
     loadDocuments();
     return () => {
       alive = false;
     };
-  }, [loadDocuments]);
+  }, [assetId, loadDocuments]);
 
   /* 切文档就重新读盘；文件被删时明确说「磁盘上没有」，不拿旧内容冒充。 */
   useEffect(() => {
-    if (!activePath) return;
+    if (!activePath || !assetId) return;
     let alive = true;
-    void api.getFileContent('a-kb', activePath).then((envelope) => {
+    void api.getFileContent(assetId, activePath).then((envelope) => {
       if (!alive) return;
       if (!envelope.ok) {
         setPlain('');
@@ -69,7 +76,7 @@ export default function KbDetail(): React.ReactElement {
     return () => {
       alive = false;
     };
-  }, [activePath]);
+  }, [activePath, assetId]);
 
   /* 高亮命中后把该行滚到视野中间（渲染完成下一帧再滚）。 */
   useEffect(() => {
@@ -99,7 +106,7 @@ export default function KbDetail(): React.ReactElement {
     }
     setSearching(true);
     void api
-      .searchAsset('a-kb', value)
+      .searchAsset(assetId, value)
       .then((envelope) => {
         if (!envelope.ok) {
           addToast(`检索失败：${envelope.error?.message ?? '未知错误'}`);
@@ -119,7 +126,7 @@ export default function KbDetail(): React.ReactElement {
   const rebuildIndex = (): void => {
     setReindexing(true);
     void api
-      .advanceIndex('a-kb')
+      .advanceIndex(assetId)
       .then((envelope) => {
         if (!envelope.ok) {
           addToast(`重建失败：${envelope.error?.message ?? '未知错误'}`);

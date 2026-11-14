@@ -16,7 +16,7 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store';
-import { api, type Skill } from '../api/client';
+import { api, type ContextUsage, type Skill } from '../api/client';
 import { useLiveRefresh } from '../api/live';
 import {
   AtIcon,
@@ -74,6 +74,17 @@ export interface ComposerProps {
   meter: React.ReactNode;
   /** 只读模式下禁用发送（信任边界由服务端裁决，前端只是同步提示）。 */
   readOnly?: boolean;
+  /** 上下文消耗 + 压缩（工具栏右侧的小按钮）。缺省时不显示该按钮。 */
+  context?: ComposerContextMeter;
+}
+
+/** 上下文小按钮的数据与控制口（由页面通过 useContextUsage 提供）。 */
+export interface ComposerContextMeter {
+  usage: ContextUsage | null;
+  loading: boolean;
+  compacting: boolean;
+  onRefresh: () => void;
+  onCompact: () => void;
 }
 
 interface MenuItem {
@@ -131,11 +142,36 @@ function IconModel(): React.ReactElement {
   return <ModelIcon size={15} strokeWidth={1.2} />;
 }
 
+/* ── 上下文消耗的小圆环 ─────────────────────────────────
+ * 用圆环而不是纯数字：一圈还剩多少是"余光可读"的，数字要点进去才看得懂。
+ * 颜色只在 near / over 时才变 —— 常态下不抢注意力。 */
+function ctxText(tokens: number): string {
+  if (tokens >= 10000) return `${Math.round(tokens / 1000)}k`;
+  if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k`;
+  return String(tokens);
+}
+
+function CtxRing({ ratio, state }: { ratio: number; state: 'ok' | 'near' | 'over' }): React.ReactElement {
+  const r = 6.2;
+  const circumference = 2 * Math.PI * r;
+  const filled = Math.min(1, Math.max(0, ratio));
+  return (
+    <svg width={16} height={16} viewBox="0 0 16 16" className={`ctxring ${state}`} aria-hidden>
+      <circle cx="8" cy="8" r={r} fill="none" stroke="currentColor" strokeWidth={1.8} opacity={0.16} />
+      <circle
+        cx="8" cy="8" r={r} fill="none" stroke="currentColor" strokeWidth={1.8}
+        strokeDasharray={`${circumference * filled} ${circumference}`}
+        strokeLinecap="round" transform="rotate(-90 8 8)"
+      />
+    </svg>
+  );
+}
+
 export default function Composer(props: ComposerProps): React.ReactElement {
   const {
     value, onChange, onSend, assets, picked, onPickedChange,
     attachments, onAttachmentsChange, onUpload, uploading,
-    model, onModelChange, onCommand, meter,
+    model, onModelChange, onCommand, meter, context,
   } = props;
   const { state, addToast, setModal, setHelp, setReadOnly, toggleReadOnly } = useStore();
   const refresh = useLiveRefresh();
@@ -144,6 +180,8 @@ export default function Composer(props: ComposerProps): React.ReactElement {
   const [trigger, setTrigger] = useState<TriggerMatch | null>(null);
   const [active, setActive] = useState<number>(0);
   const [modelOpen, setModelOpen] = useState<boolean>(false);
+  /** 上下文浮层开关。点空白处自动收起 —— 它是"按需一瞥"的面板，不该常驻。 */
+  const [ctxOpen, setCtxOpen] = useState<boolean>(false);
   const [skills, setSkills] = useState<Skill[]>([]);
   /* 模型候选 = **用户已添加的模型档案**，不是供应商目录。
    * 目录里的模型用户一个都没配过，选了也调不通 —— 下拉里该列的是"我真能用的那些"。 */
@@ -154,6 +192,17 @@ export default function Composer(props: ComposerProps): React.ReactElement {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const composingRef = useRef<boolean>(false);
+  const ctxWrapRef = useRef<HTMLDivElement>(null);
+
+  /* 点浮层外面就收起：不阻塞其它按钮，也不留一个挡视线的面板。 */
+  useEffect(() => {
+    if (!ctxOpen) return undefined;
+    const onDown = (event: MouseEvent): void => {
+      if (ctxWrapRef.current && !ctxWrapRef.current.contains(event.target as Node)) setCtxOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [ctxOpen]);
 
   /* 技能清单来自服务端登记表；离线时 api 层自动回落内置副本。 */
   useEffect(() => {
@@ -680,6 +729,94 @@ export default function Composer(props: ComposerProps): React.ReactElement {
           </button>
 
           <div className="grow" />
+
+          {/* 上下文消耗 + 压缩：决策点就在输入框旁边 ——
+           * "我还要不要接着问"这个判断是在这里做的，不是去看状态栏。 */}
+          {context ? (
+            <div className="ctxwrap" ref={ctxWrapRef}>
+              <button
+                className={`tbtn tbtn-label ctxbtn${ctxOpen ? ' on' : ''}`}
+                type="button"
+                title={context.usage
+                  ? `上下文 ${ctxText(context.usage.used)} / ${ctxText(context.usage.budget)} · 点击查看构成与压缩`
+                  : '上下文用量读取中'}
+                onClick={() => {
+                  setCtxOpen((prev) => !prev);
+                  setModelOpen(false);
+                  setTrigger(null);
+                  if (!ctxOpen) context.onRefresh();
+                }}
+              >
+                <CtxRing ratio={context.usage?.ratio ?? 0} state={context.usage?.state ?? 'ok'} />
+                <span className="tbtn-text">
+                  {context.usage ? `${ctxText(context.usage.used)}/${ctxText(context.usage.budget)}` : '—'}
+                </span>
+              </button>
+              {ctxOpen ? (
+                <div className="ctxpop">
+                  {context.usage ? (
+                    <>
+                      <div className="cxh">
+                        <span className="cxt">上下文占用</span>
+                        <span className={`cxpct ${context.usage.state}`}>
+                          {Math.round(context.usage.ratio * 100)}%
+                        </span>
+                      </div>
+                      <div className="cxbar">
+                        <i
+                          className={context.usage.state}
+                          style={{ width: `${Math.min(100, Math.max(2, context.usage.ratio * 100))}%` }}
+                        />
+                      </div>
+                      <div className="cxline">
+                        <span>{ctxText(context.usage.used)} / {ctxText(context.usage.budget)} tokens</span>
+                        <span>{context.usage.messages.inWindow}/{context.usage.messages.total} 条在提示内</span>
+                      </div>
+                      <div className="cxlist">
+                        {context.usage.breakdown.map((item) => (
+                          <div className="cxrow" key={item.name}>
+                            <span className="cxn">{item.name}</span>
+                            <span className="cxb">
+                              <i style={{ width: `${context.usage && context.usage.used > 0 ? Math.max(2, (item.tokens / context.usage.used) * 100) : 2}%` }} />
+                            </span>
+                            <span className="cxv">{ctxText(item.tokens)}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <div className={`cxnote${context.usage.state === 'over' ? ' warn' : ''}`}>
+                        {context.usage.state === 'over'
+                          ? `已到自动压缩水位（${Math.round(context.usage.autoCompactAt * 100)}%）：下一轮发送前会自动压缩并继续。`
+                          : context.usage.messages.folded > 0
+                            ? `预算外还有 ${context.usage.messages.folded} 条消息未进提示${context.usage.summary ? '（已由上面那次摘要覆盖）' : '，点「压缩上下文」可把它们提炼成摘要'}。`
+                            : `预算来源：${context.usage.windowSource === 'setting' ? '设置页指定' : context.usage.windowSource === 'model' ? '按模型推断' : '默认 128k'}。`}
+                        {context.usage.summary
+                          ? ` 上次压缩：折叠 ${context.usage.summary.messages} 条 · ${context.usage.summary.source === 'model' ? '模型提炼' : '规则提炼'}。`
+                          : ''}
+                      </div>
+                      <div className="cxf">
+                        <button
+                          className="btn"
+                          type="button"
+                          disabled={context.compacting || context.loading}
+                          onClick={context.onCompact}
+                        >
+                          {context.compacting ? '压缩中…' : '压缩上下文'}
+                        </button>
+                        <button className="btn" type="button" disabled={context.loading} onClick={context.onRefresh}>
+                          刷新
+                        </button>
+                      </div>
+                      <div className="cfoot">压缩只影响「发给模型的内容」，原始消息仍完整留在时间线里。</div>
+                    </>
+                  ) : (
+                    <div className="cxempty">
+                      {context.loading ? '正在读取上下文用量…' : '暂无用量数据（会话还没有消息，或后端未就绪）'}
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
 
           {/* 发送 */}
           <button className="send" type="button" title="发送 ⌘↵" onClick={send}>

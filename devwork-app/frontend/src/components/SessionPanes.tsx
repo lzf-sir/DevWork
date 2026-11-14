@@ -1,38 +1,135 @@
 /**
  * 会话三问面板 —— 上下文 / 执行 / 产物。
  *
- * 这三块内容以前是右栏里的三个常驻 Tab。现在它们改成**会话区右侧的悬浮气泡**
- * （见 components/ChatHudDock.tsx），所以内容必须从布局里抽出来，
- * 让「气泡」和「任何未来要复用它的地方」都能挂同一份实现。
+ * 这三块是「这条会话在干什么」的三个追问：看到了什么 / 跑了什么 / 产出了什么。
+ * 内容与容器分开：面板只管内容，装它的地方是**侧边工作区的一个 tab**
+ * （见 components/WorkbenchPanel.tsx），入口是会话右缘的图标坞
+ * （见 components/ChatHudDock.tsx）。
  *
- * 为什么是悬浮气泡而不是右栏常驻：
- * 右栏那个位置应该留给**工具**（内置浏览器、文件、终端）——
- * 那是「我现在能操作什么」；而上下文 / 执行 / 产物回答的是
- * 「刚才那轮到底怎么回事」——是**追问**，问完就该收起来。
+ * 为什么不再用常驻栏位 / 悬浮气泡：
+ *   常驻栏位把位置占死，气泡又不能并排看两份；工作区 tab 既能多个并存，
+ *   又能随手关掉 —— 这才匹配「一边干活一边追问」的节奏。
  *
  * 数据统一由 LiveDataProvider 按活跃会话装配（useLiveData），
  * 组件里不写死任何演示常量。
  */
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useStore } from '../store';
 import { api } from '../api/client';
 import { useLiveData } from '../api/live';
-import { ChartIcon, DownloadIcon, FileIcon, FolderIcon, SearchIcon, TerminalIcon } from './icons';
+import type { Message } from '../data/mock';
+import { ChartIcon, DownloadIcon, FileIcon, FolderIcon, SearchIcon, TerminalIcon, TodoIcon } from './icons';
+import { buildContextTurns, summarizeTurns } from '../utils/contextSteps';
 
-/** 产物行：气泡里点击 = 在右栏「文件」Tab 打开；下载图标独立，不触发打开。 */
+/** 任务清单卡（从会话时间线里取的原始结构，不另建模型）。 */
+type TodoCard = Extract<Message, { kind: 'todo' }>;
+
+/** 产物行：点击 = 在工作区新开一个预览 tab；下载图标独立，不触发打开。 */
 export interface ArtifactPaneProps {
-  /** 紧凑模式（气泡内）：行距更紧，少留白。 */
+  /** 紧凑模式：行距更紧（工作区里一般用默认，气泡时代的遗留参数保留）。 */
   compact?: boolean;
 }
 
-/** 上下文面板：它现在看到了什么？（已挂载资产 / 检索命中 / 上下文构成） */
+/** 上下文面板：它现在看到了什么？
+ *
+ *  分两段，回答两个不同的问题：
+ *   ① 上半段「轮次 → 步骤」——**这一轮它走了几步、哪步慢、哪步等人**（结构化的过程）；
+ *   ② 下半段「挂了什么 / 命中什么 / 构成如何」——**它凭什么这么答**（原料）。
+ *  只有 ② 的时候，人只能看到结果；只有 ① 的时候，人又不知道它依据什么。
+ */
 export function ContextPane({ compact = false }: { compact?: boolean }): React.ReactElement {
-  const { navigate, addToast } = useStore();
+  const { navigate, addToast, state } = useStore();
   const { CTX_MOUNTED, CTX_HITS, CTX_BARS } = useLiveData();
+
+  const conversationId = state.activeConversationId;
+  const messages = state.threads[conversationId] ?? [];
+  const turns = useMemo(
+    () => buildContextTurns(messages, state.streams[conversationId] ?? null),
+    [messages, state.streams, conversationId],
+  );
+  const summary = useMemo(() => summarizeTurns(turns), [turns]);
+  /* 默认展开最后一轮：人打开面板，八成是在问「它刚才那步干了什么」。 */
+  const [openTurn, setOpenTurn] = useState<number | null>(null);
+  const activeTurn = openTurn ?? turns[turns.length - 1]?.index ?? null;
 
   return (
     <>
-      <div className="pt">已挂载 {CTX_MOUNTED.length} 个资产</div>
+      <div className="ctx-sum">
+        <div>
+          <b>{summary.turns}</b>
+          <span>轮</span>
+        </div>
+        <div>
+          <b>{summary.steps}</b>
+          <span>步</span>
+        </div>
+        <div>
+          <b>{summary.toolMs >= 1000 ? `${(summary.toolMs / 1000).toFixed(1)}s` : `${summary.toolMs}ms`}</b>
+          <span>工具耗时</span>
+        </div>
+        <div>
+          {/* token 只显示真值；没有就是「—」，不拿字符数估一个好看的数字。 */}
+          <b>{summary.hasTokenTruth ? summary.tokens.toLocaleString() : '—'}</b>
+          <span>tokens</span>
+        </div>
+      </div>
+
+      <div className="pt">每一步</div>
+      {turns.length === 0 ? (
+        <div className="cempty">
+          <span className="cempty-ic">
+            <SearchIcon size={14} strokeWidth={1.4} />
+          </span>
+          <span>这条会话还没有步骤。发出第一条消息后，模型每走一步都会在这里留下痕迹。</span>
+        </div>
+      ) : null}
+
+      {turns.map((turn) => {
+        const open = activeTurn === turn.index;
+        return (
+          <div className={`ctx-turn${open ? ' on' : ''}`} key={`${turn.index}-${turn.ask.slice(0, 12)}`}>
+            <button
+              className="ctx-turn-hd"
+              type="button"
+              onClick={() => setOpenTurn(open ? -1 : turn.index)}
+              aria-expanded={open}
+            >
+              <span className={`ctx-turn-no${turn.running ? ' run' : ''}`}>{turn.index}</span>
+              <span className="ctx-turn-ask">{turn.ask || '（空提问）'}</span>
+              <span className="ctx-turn-meta">
+                {turn.steps.length} 步
+                {turn.toolMs > 0 ? ` · ${turn.toolMs >= 1000 ? `${(turn.toolMs / 1000).toFixed(1)}s` : `${turn.toolMs}ms`}` : ''}
+              </span>
+            </button>
+            {turn.chips.length > 0 ? (
+              <div className="ctx-turn-chips">
+                {turn.chips.map((chip) => (
+                  <span key={chip}>{chip}</span>
+                ))}
+              </div>
+            ) : null}
+            {open ? (
+              <div className="ctx-steps">
+                {turn.steps.length === 0 ? (
+                  <div className="ctx-step empty">这一轮还没有落到具体步骤</div>
+                ) : (
+                  turn.steps.map((step) => (
+                    <div className="ctx-step" key={step.id} data-status={step.status}>
+                      <span className="ctx-step-dot" aria-hidden="true" />
+                      <span className="ctx-step-label">{step.label}</span>
+                      <span className="ctx-step-meta">{step.meta.filter(Boolean).join(' · ')}</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+
+      <div className="pt" style={{ marginTop: compact ? 10 : 14 }}>
+        已挂载 {CTX_MOUNTED.length} 个资产
+      </div>
       {CTX_MOUNTED.length === 0 ? (
         <div className="cempty">
           <span className="cempty-ic">
@@ -105,7 +202,117 @@ export function ContextPane({ compact = false }: { compact?: boolean }): React.R
   );
 }
 
-/** 执行面板：它跑了什么？（工具调用清单 / 耗时 / 待审批项） */
+/** 任务列表：这条会话的待办清单。
+ *
+ *  数据就是会话时间线里的 todo 卡（同一张卡原位更新，id 不变），这里只做
+ *  「汇总 + 全量清单」的视图，**不另存一份状态** —— 否则会话里推进了、这里还是旧的。
+ *
+ *  为什么要有这个视图：清单卡在会话里是夹在对话中间的，长任务往下滚两屏就找不到了；
+ *  钉在工作区里才能随时确认「还剩几步、哪步卡住了」。
+ */
+export function TodoListPane(): React.ReactElement {
+  const { state } = useStore();
+  const conversationId = state.activeConversationId;
+  const cards = useMemo(() => {
+    const messages = state.threads[conversationId] ?? [];
+    return messages.filter((message): message is TodoCard => message.kind === 'todo');
+  }, [state.threads, conversationId]);
+
+  /* 汇总按「项」算，不按「卡」算：用户关心的是还剩几件事，不是还剩几张卡。 */
+  const totals = cards.reduce(
+    (acc, card) => ({
+      total: acc.total + card.progress.total,
+      done: acc.done + card.progress.done,
+      doing: acc.doing + card.progress.doing,
+      blocked: acc.blocked + card.progress.blocked,
+    }),
+    { total: 0, done: 0, doing: 0, blocked: 0 },
+  );
+  const percent = totals.total > 0 ? Math.round((totals.done / totals.total) * 100) : 0;
+
+  return (
+    <>
+      <div className="ctx-sum">
+        <div>
+          <b>{cards.length}</b>
+          <span>清单</span>
+        </div>
+        <div>
+          <b>{totals.done}/{totals.total}</b>
+          <span>项已完成</span>
+        </div>
+        <div>
+          <b>{totals.doing}</b>
+          <span>进行中</span>
+        </div>
+        <div>
+          <b style={totals.blocked > 0 ? { color: 'var(--warning)' } : undefined}>{totals.blocked}</b>
+          <span>受阻</span>
+        </div>
+      </div>
+
+      <div className="pt">完成度 {percent}%</div>
+      <div className="bars">
+        <div className="r">
+          <span className="nm">任务进度</span>
+          <span className="b">
+            <i style={{ width: `${percent}%` }} />
+          </span>
+          <span className="v">{percent}%</span>
+        </div>
+      </div>
+
+      {cards.length === 0 ? (
+        <div className="cempty">
+          <span className="cempty-ic">
+            <TodoIcon size={14} strokeWidth={1.4} />
+          </span>
+          <span>
+            这条会话还没有任务清单。当它开始做一件需要多步完成的事（查数 → 取数 → 复核），
+            会在这里列出每一步的状态。
+          </span>
+        </div>
+      ) : null}
+
+      {cards.map((card, cardIndex) => {
+        const allDone = card.progress.total > 0 && card.progress.done === card.progress.total;
+        return (
+          <div className="todo" key={card.id} data-todo-progress={card.progress.percent}>
+            <div className="th">
+              <span className="tt">
+                {allDone ? '任务已完成' : `任务清单 · 第 ${cardIndex + 1} 张`}
+              </span>
+              <span className="tp">
+                {card.progress.done}/{card.progress.total}
+              </span>
+              {card.progress.blocked > 0 ? <span className="tb warn">{card.progress.blocked} 项受阻</span> : null}
+              {card.degraded ? <span className="tb">演示轨迹</span> : null}
+              <div className="tbar" title={`完成度 ${card.progress.percent}%`}>
+                <i style={{ width: `${card.progress.percent}%` }} />
+              </div>
+            </div>
+            <ul>
+              {card.items.map((item, index) => (
+                <li key={`${card.id}-${item.id}`} className={`ti ${item.status}`}>
+                  <span className="tic" aria-hidden>
+                    {item.status === 'done' ? '✓' : item.status === 'doing' ? '▸' : item.status === 'blocked' ? '!' : index + 1}
+                  </span>
+                  <span className="tit">{item.title}</span>
+                  {item.note ? <span className="tin">{item.note}</span> : null}
+                </li>
+              ))}
+            </ul>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+/** 执行面板：它跑了什么？（工具调用清单 / 耗时 / 待审批项）
+ *
+ *  当前没有入口挂它（工作区只保留 上下文 / 任务列表 / 浏览器 / 产物详情），
+ *  实现先留着：工具级明细是「任务列表」的下钻视图，后续接进任务列表的展开项。 */
 export function ExecutionPane({ compact = false }: { compact?: boolean }): React.ReactElement {
   const { focusApproval, addToast } = useStore();
   const { RUN_TOOLS, RUN_BARS } = useLiveData();
@@ -160,11 +367,13 @@ export function ExecutionPane({ compact = false }: { compact?: boolean }): React
   );
 }
 
-/** 产物面板：它产出了什么？（文件列表 + 下载 + 在右栏打开） */
+/** 产物清单：它产出了什么？（浮层里用：选一个 → 在工作区开详情 tab）
+ *
+ *  这是**选择器**，不是内容区：清单不进工作区，工作区只放单个产物的详情。
+ *  所以这里不做"展开预览"，点一行就直接开 tab 并收起浮层。 */
 export function ArtifactPane({ compact = false }: ArtifactPaneProps): React.ReactElement {
   const { addToast, openArtifact } = useStore();
   const { OUTPUT_FILES } = useLiveData();
-  const [expanded, setExpanded] = useState<string | null>(null);
 
   /** 产物下载：走服务端真接口拿下载地址，再用浏览器下载。 */
   const download = (id: string, name: string): void => {
@@ -195,49 +404,42 @@ export function ArtifactPane({ compact = false }: ArtifactPaneProps): React.Reac
         </div>
       ) : null}
       {OUTPUT_FILES.map((file) => (
-        <React.Fragment key={file.name}>
-          <div
-            className="frow"
-            onClick={() => {
-              /* 点行 = 在右栏「文件」Tab 里打开并预览（气泡只是入口，预览有专门的版面）。 */
-              openArtifact({ id: file.id ?? file.name, name: file.name });
-              setExpanded(file.name);
+        <div
+          className="frow"
+          key={file.name}
+          title={`在工作区查看 ${file.name}`}
+          onClick={() => {
+            /* 点行 = 开详情 tab（openArtifact 会顺手收起浮层）。 */
+            openArtifact({ id: file.id ?? file.name, name: file.name });
+          }}
+        >
+          <div className="fi" style={{ background: file.bg, color: file.fg }}>
+            {file.tag}
+          </div>
+          <div className="fn">{file.name}</div>
+          <span style={{ fontSize: 11, color: 'var(--gray-400)' }}>{file.size}</span>
+          <span
+            className="fdl"
+            title={`下载 ${file.name}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              download(file.id ?? file.name, file.name);
             }}
           >
-            <div className="fi" style={{ background: file.bg, color: file.fg }}>
-              {file.tag}
-            </div>
-            <div className="fn">{file.name}</div>
-            <span style={{ fontSize: 11, color: 'var(--gray-400)' }}>{file.size}</span>
-            <span
-              className="fdl"
-              title={`下载 ${file.name}`}
-              onClick={(event) => {
-                event.stopPropagation();
-                download(file.id ?? file.name, file.name);
-              }}
-            >
-              <DownloadIcon size={13} strokeWidth={1.4} />
-            </span>
-          </div>
-          {expanded === file.name ? (
-            <div className="fpreview">
-              <div className="fpimg">
-                {file.name} · 已推送到右栏「文件」Tab 预览
-              </div>
-              <div>
-                {file.name} · {file.size} · 生成于本会话 · 点击右侧下载图标保存原文件
-              </div>
-            </div>
-          ) : null}
-        </React.Fragment>
+            <DownloadIcon size={13} strokeWidth={1.4} />
+          </span>
+        </div>
       ))}
-      <div className="pt" style={{ marginTop: compact ? 10 : 14 }}>
-        说明
-      </div>
-      <div style={{ fontSize: 11.5, color: 'var(--gray-400)', lineHeight: 1.7 }}>
-        点一行在右栏预览，产物随会话保存。
-      </div>
+      {compact ? null : (
+        <>
+          <div className="pt" style={{ marginTop: 14 }}>
+            说明
+          </div>
+          <div style={{ fontSize: 11.5, color: 'var(--gray-400)', lineHeight: 1.7 }}>
+            点一行就在工作区开一个详情标签页，产物随会话保存。
+          </div>
+        </>
+      )}
     </>
   );
 }

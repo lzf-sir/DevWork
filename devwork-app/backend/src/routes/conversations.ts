@@ -61,12 +61,13 @@ import {
 } from '../services/workspace-repos';
 import {
   llmKeyStatus, setLlmKey, llmRuntimeConfig, resolveLlmApiKey, testLlmConnection, fetchLlmModels, LLM_PRESETS,
-  llmProfileList, llmActiveProfileId, llmProfileKeyRef, llmProfileKeyStatus, saveLlmProfiles,
+  llmProfileList, llmActiveProfileId, llmProfileKeyRef, llmProfileKeyStatus, saveLlmProfiles, createGateway,
   type LlmProfile,
 } from '../services/llm-gateway';
+import { compactConversation, measureContext } from '../services/context-budget';
 import { SKILL_REGISTRY, skillShape, validateSkillRegistry } from '../config/skills';
 import { deleteSecret } from '../services/secret-store';
-import { deriveToolFace } from '../config/tool-catalog';
+import { deriveToolFace, gatewayToolFace } from '../config/tool-catalog';
 import { CMD_TEMPLATES } from '../config/cmd-templates';
 import { bind, credentialSecret, renew, revoke } from '../services/credential';
 import {
@@ -85,7 +86,7 @@ import { PORT } from '../config';
 type Row = Record<string, unknown>;
 import { body, optionalId, requireRow } from './helpers';
 import { parseBody } from '../http/validate';
-import { approvalDecisionSchema, approvalRollbackSchema, attachmentUploadSchema, commandSuggestionSchema, conversationCreateSchema, conversationPatchSchema, sendMessageSchema, truncateMessagesSchema } from '../../../shared/contracts';
+import { approvalDecisionSchema, approvalRollbackSchema, attachmentUploadSchema, commandSuggestionSchema, compactContextSchema, conversationCreateSchema, conversationPatchSchema, sendMessageSchema, truncateMessagesSchema } from '../../../shared/contracts';
 
 export function registerConversationRoutes(app: Express): void {
   /* ---------------- G4 会话 / 消息 / 引用 ---------------- */
@@ -351,15 +352,51 @@ export function registerConversationRoutes(app: Express): void {
       });
       return;
     }
-    /* B13：无 usage_stat 行时按消息内容估算（中文约 2 字符/token），不再写死假值。 */
-    const messages = all<Row>('SELECT payload FROM message WHERE conversation_id = ?', req.params.id);
-    const chars = messages.reduce((sum, m) => sum + String(m.payload ?? '').length, 0);
-    const contextBudget = 204800;
+    /* B13：无 usage_stat 行时按上下文预算口径实算（不再写死假值）。 */
+    const conversation = get<Row>('SELECT workspace_id FROM conversation WHERE id = ?', String(req.params.id));
+    const face = conversation ? deriveToolFace(String(conversation.workspace_id)) : undefined;
+    const usage = measureContext(String(req.params.id), { toolCount: face ? gatewayToolFace(face).length : 0 });
     ok(res, {
-      contextUsed: Math.round(chars / 2),
-      contextBudget,
-      costCny: Number((messages.length * 0.03).toFixed(2)),
-      model: 'Claude-Sonnet',
+      contextUsed: usage.used,
+      contextBudget: usage.budget,
+      costCny: 0,
+      model: usage.model || '未接入模型',
     });
+  }));
+
+  /* 上下文用量明细：输入框那个小按钮读它（占用 / 预算 / 构成 / 上次压缩）。
+   * 与 /usage 分开是因为两者读者不同：/usage 给状态栏看总量，这里给"要不要压缩"看结构。 */
+  app.get('/api/conversations/:id/context-usage', wrap(async (req: Request, res: Response) => {
+    const id = String(req.params.id);
+    const conversation = requireRow(get<Row>('SELECT workspace_id FROM conversation WHERE id = ?', id), '会话');
+    const model = queryString(req, 'model') || undefined;
+    const face = deriveToolFace(String(conversation.workspace_id));
+    ok(res, measureContext(id, { model, toolCount: gatewayToolFace(face).length }));
+  }));
+
+  /* 手动压缩：把早前对话折叠成一张摘要卡（原始消息不动，只是不再整段进提示）。 */
+  app.post('/api/conversations/:id/compact', wrap(async (req: Request, res: Response) => {
+    const id = String(req.params.id);
+    const conversation = requireRow(get<Row>('SELECT workspace_id FROM conversation WHERE id = ?', id), '会话');
+    const payload = parseBody(compactContextSchema, req);
+    const model = typeof payload.model === 'string' && payload.model.trim() ? payload.model.trim() : undefined;
+    const gateway = await createGateway(model);
+    const result = await compactConversation({
+      conversationId: id,
+      mode: 'manual',
+      model: model ?? gateway.modelName,
+      keepShare: typeof payload.keepShare === 'number' ? payload.keepShare : undefined,
+      gateway,
+    });
+    if (!result.skipped) {
+      writeAudit({
+        workspaceId: String(conversation.workspace_id), conversationId: id,
+        actor: (await identity(req)).name, source: 'user',
+        action: 'context.compact', target: id, result: '成功', severity: 'info',
+        detail: `手动压缩：折叠 ${result.covered} 条对话，上下文 ${result.before} → ${result.after} tokens，`
+          + `摘要来源 ${result.summary?.source === 'model' ? `模型 ${result.summary.model}` : '规则提炼'}`,
+      });
+    }
+    ok(res, result);
   }));
 }

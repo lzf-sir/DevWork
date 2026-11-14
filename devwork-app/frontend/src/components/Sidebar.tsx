@@ -1,11 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store';
-import { AssetIcon, DotsIcon, GearIcon, PlusIcon } from './icons';
+import { AssetIcon, ChartIcon, DotsIcon, GearIcon, PlusIcon } from './icons';
 import { ASSET_TYPE_LABEL } from '../utils/assetActions';
 import AssetConnect from './AssetConnect';
 import { Resizer, usePanelWidth } from './Resizer';
+import { waitingLevel as levelOf, waitingTip as tipOf, waitingBadgeText } from '../utils/waiting';
 import { api } from '../api/client';
 import type { AssetFolder, AssetItem, ConvFolder, SidebarData, ViewName } from '../api/client';
+
+/* 「待人」状态搬到 store 了（state.waiting，全局 10 秒一刷）。
+ *
+ * 原来这里自己 30 秒拉一次 stats，能工作但有两个问题：
+ *   ① 只有侧栏知道 —— 会话 tab 上自然就画不出橙点，人被要在别的会话里找；
+ *   ② 30 秒对阻塞态太慢，Agent 停下来等人，半分钟后界面才动一下。
+ * 现在侧栏、会话 tab、协作流读的是同一份快照，数字不会再互相打架。 */
 
 /** 折叠状态以服务端为准：这里只是渲染期的乐观副本。 */
 function initialFolderState(data: SidebarData): Record<string, boolean> {
@@ -51,12 +59,27 @@ const GLYPH_KIND: Record<string, string> = {
 /** 左栏：208px，资产中心 / 会话两个分区 + 底部固定入口。
  *  收起 / 展开入口统一在窗口左上角（顶栏 .menu-toggle），本组件内不再放折叠按钮。 */
 export default function Sidebar(): React.ReactElement {
-  const { state, navigate, setConversation, addToast, reloadSidebar, setModal, newConversation, renameConversation, removeConversation, archiveConversation, setActiveAsset } =
+  const { state, navigate, setConversation, addToast, reloadSidebar, setModal, newConversation, renameConversation, removeConversation, archiveConversation, setActiveAsset, toggleCollab } =
     useStore();
   const project = state.projects.find((p) => p.id === state.workspaceId) ?? state.projects[0];
   const data = project.sidebar;
   const [folders, setFolders] = useState<Record<string, boolean>>(() => initialFolderState(data));
   const [wizardOpen, setWizardOpen] = useState<boolean>(false);
+  /* 待人状态：读全局快照，不再本组件轮询。
+   * 颜色与文案的计算搬去 utils/waiting —— 任务栏徽标和这里必须用同一套说法。 */
+  const waiting = state.waiting;
+  const waitingHere = waiting.filter((item) => item.conversationId === state.activeConversationId);
+  const waitingLevel = levelOf(waiting);
+  const waitingTip = tipOf(waiting);
+  /** 点徽标：当前会话就有单在等你 → 直接开它的协作流；否则去工单页看全量。
+   *  不偷偷切会话 —— 你正在写的那句话比省一次点击值钱。 */
+  const openWaiting = (): void => {
+    if (waitingHere.length > 0) {
+      toggleCollab(true);
+      return;
+    }
+    navigate('shadow');
+  };
   /** 左栏宽度：180~260px，拖拽手柄在右边界，宽度落 localStorage。 */
   const { width, dragging, beginDrag, reset: resetWidth } = usePanelWidth({
     storageKey: 'devwork-side-width', initial: 208, min: 180, max: 260,
@@ -454,6 +477,36 @@ export default function Sidebar(): React.ReactElement {
       </div>
 
       <div className="side-foot">
+        {/* 智能体工作台：工单 / 准入 / 账本三区。
+            放在设置旁边而不是主导航：它是「管理这台机器的行为」的入口，
+            不是日常聊天动作。有单在等人时，右侧直接显示数字 —— 
+            藏在页面里的待办等于没有待办。 */}
+        <div
+          className={`sfoot${state.view === 'shadow' ? ' on' : ''}`}
+          onClick={() => navigate('shadow')}
+          title={waitingTip || undefined}
+        >
+          <ChartIcon size={14} strokeWidth={1.4} />
+          智能体
+          {waiting.length > 0 ? (
+            /* 可点的徽标：点它 = 去看「谁在等我」。只画个数字不给入口，
+             * 等于告诉人有事又不告诉人往哪走。 */
+            <button
+              type="button"
+              className={`sh-side-badge lv-${waitingLevel}`}
+              title={waitingTip}
+              aria-label={waitingTip.replace(/\n/g, '，')}
+              onClick={(event) => {
+                event.stopPropagation();
+                openWaiting();
+              }}
+            >
+              {waitingBadgeText(waiting)}
+            </button>
+          ) : (
+            <span className="k">P3</span>
+          )}
+        </div>
         <div className={`sfoot${state.view === 'settings' ? ' on' : ''}`} onClick={() => navigate('settings')}>
           <GearIcon size={14} strokeWidth={1.4} />
           系统设置

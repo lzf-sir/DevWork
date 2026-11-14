@@ -621,6 +621,26 @@ export function mockFallthrough<T>(method: HttpMethod, path: string, body?: unkn
   if (/^\/conversations\/[^/]+\/execution$/.test(clean)) return data(panelsShape().execution);
   if (/^\/conversations\/[^/]+\/artifacts$/.test(clean)) return data(panelsShape().artifacts);
   if (/^\/conversations\/[^/]+\/usage$/.test(clean)) return data(statusBarShape());
+  /* 上下文用量明细（输入框小按钮）：离线时给一份结构正确的估算，
+   * 不假装是真实预算 —— 提示文案由 UI 的「离线」状态兜住。 */
+  if (/^\/conversations\/[^/]+\/context-usage$/.test(clean)) {
+    const used = 32000;
+    const budget = 128000;
+    return data({
+      used, budget, ratio: used / budget, autoCompactAt: 0.8,
+      state: 'ok', windowSource: 'default', model: '未接入模型',
+      breakdown: [
+        { name: '系统与工具', tokens: 1520 },
+        { name: '历史对话', tokens: used - 1520 },
+      ],
+      messages: { total: 6, inWindow: 6, folded: 0 },
+      summary: null,
+      shouldCompact: false,
+    });
+  }
+  if (/^\/conversations\/[^/]+\/compact$/.test(clean)) {
+    return data({ skipped: true, reason: '离线 Mock：没有真实会话上下文可压缩', before: 0, after: 0, freed: 0, covered: 0 });
+  }
   /* B21：会话重命名 / 删除 / 归档的离线兜底（与后端语义一致）。 */
   if (/^\/conversations\/[^/]+$/.test(clean) && method === 'DELETE') return data({ deleted: true });
   if (/^\/conversations\/[^/]+$/.test(clean) && method === 'PATCH') {

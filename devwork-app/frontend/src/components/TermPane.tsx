@@ -1,11 +1,12 @@
 /**
- * 终端（右栏工作台 · 终端 Tab）。
+ * 终端（原右栏工作台的「终端」Tab）。
  *
  * 与「服务器详情」页的终端同源：都走服务端 PermissionKernel + CommandExecutor，
  * 前端只展示 allow / deny / suggest 三种裁决结果，不在前端猜权限。
  *
- * 为什么把它放进工作台：Agent 排查时经常需要「看一眼现场」——
- * 命令行、网页、产物三类现场摆在同一列右侧，不用在页面之间来回跳。
+ * **当前没有入口挂它**：会话右缘的入口收敛成四个固定图标
+ * （上下文 / 任务列表 / 产物 / 浏览器），终端不在其中。
+ * 组件保留完整实现，等需要时从入口坞或命令面板接回来即可。
  */
 import React, { useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
@@ -14,11 +15,13 @@ import { useAssetCandidates } from '../hooks/useChatSession';
 import { TerminalIcon } from './icons';
 
 export default function TermPane(): React.ReactElement {
-  const { addToast } = useStore();
-  const assets = useAssetCandidates('w-ops');
+  const { state, addToast } = useStore();
+  /* 资产候选按当前工作区取 —— 写死 w-ops 会把别的工作区的资产混进来。 */
+  const assets = useAssetCandidates(state.workspaceId);
   /** 服务器类资产（终端只对服务器资产有效）。 */
   const servers = assets.filter((asset) => asset.type === 'server');
-  const [assetId, setAssetId] = useState<string>(servers[0]?.id ?? 'a-order-api');
+  const firstServerId = servers[0]?.id ?? '';
+  const [assetId, setAssetId] = useState<string>('');
   const [sessionId, setSessionId] = useState<string>('');
   const [command, setCommand] = useState<string>('');
   const [lines, setLines] = useState<TermLine[]>([
@@ -33,8 +36,15 @@ export default function TermPane(): React.ReactElement {
     if (el) el.scrollTop = el.scrollHeight;
   }, [lines]);
 
+  /* 候选列表是异步回来的：拿到后把选中项对齐到真实服务器资产。 */
+  useEffect(() => {
+    if (!firstServerId) return;
+    setAssetId(firstServerId);
+  }, [firstServerId]);
+
   /* 会话列表：取最近一个；没有就新建一个。 */
   useEffect(() => {
+    if (!assetId) return;
     let alive = true;
     void api.listTerminalSessions(assetId).then((envelope) => {
       if (!alive || !envelope.ok || !Array.isArray(envelope.data)) return;

@@ -83,7 +83,7 @@ import { normalizeBrowserUrl, readBrowserPage, readBrowserState, writeBrowserPag
 import { PORT } from '../config';
 
 type Row = Record<string, unknown>;
-import { body, optionalId, assertWorkspace, workspaceGuard, requireRow, requireAssetId } from './helpers';
+import { body, optionalId, requireRow, requireAssetId } from './helpers';
 import { parseBody } from '../http/validate';
 import { assetPatchSchema, assetSearchSchema, capabilityPatchSchema, cloneRepoSchema, credentialInputSchema, indexProgressSchema } from '../../../shared/contracts';
 import { assetCreateSchema } from '../../../shared/contracts';
@@ -182,14 +182,17 @@ export function registerAssetRoutes(app: Express): void {
     /* 契约校验一次，块内统一用 payload：同一请求重复解析只是浪费。 */
     const payload = parseBody(indexProgressSchema, req);
     const id = await requireAssetId(req);
+    const assetRow = get<{ type: string; workspace_id: string }>('SELECT type, workspace_id FROM asset WHERE id = ?', id);
     /* B15：代码资产触发真实索引管线（扫仓库 → 分块 → FTS5），不再模拟进度。 */
-    const type = String((get<{ type: string }>('SELECT type FROM asset WHERE id = ?', id))?.type ?? '');
+    const type = String(assetRow?.type ?? '');
+    /* 审计写资产**真实归属**的工作区，不写死 w-ops —— 索引的是谁的资产就记谁的账。 */
+    const ownerWorkspace = String(assetRow?.workspace_id ?? '');
     if (type === 'code') {
       const result = await runIndex(id);
       run('UPDATE asset SET index_progress = ?, status = ? WHERE id = ?', 100, 'online', id);
       const who = await identity(req);
       writeAudit({
-        workspaceId: 'w-ops', actor: who.name, source: 'user',
+        workspaceId: ownerWorkspace, actor: who.name, source: 'user',
         action: 'index.run', target: id, result: '成功', severity: 'info',
         detail: `扫描 ${result.files} 个文件 · 生成 ${result.chunks} 个索引块（FTS5）`,
       });
@@ -201,7 +204,7 @@ export function registerAssetRoutes(app: Express): void {
       const result = await runDocIndex(id);
       run('UPDATE asset SET index_progress = ?, status = ? WHERE id = ?', 100, 'online', id);
       writeAudit({
-        workspaceId: 'w-ops', actor: (await identity(req)).name, source: 'user',
+        workspaceId: ownerWorkspace, actor: (await identity(req)).name, source: 'user',
         action: 'index.run', target: id, result: '成功', severity: 'info',
         detail: `重建知识库索引：${result.files} 个文档 / ${result.chunks} 个片段`,
       });
@@ -304,10 +307,10 @@ export function registerAssetRoutes(app: Express): void {
     ok(res, await revoke(assetId, await identity(req)));
   }));
   app.get('/api/assets/:id', wrap(async (req: Request, res: Response) => {
-    const row = get<{ workspace_id: string }>('SELECT workspace_id FROM asset WHERE id = ?', req.params.id);
-    requireRow(row, '资产');
-    assertWorkspace(String(row?.workspace_id ?? ''), workspaceGuard(req));
-    ok(res, requireRow(await assetDetailShape(String(req.params.id)), '资产'));
+    /* 统一走 requireAssetId：资产存在性 + 工作区归属一次性校验，
+     * 不再另写一份守卫逻辑（两处守卫迟早会漂移）。 */
+    const id = await requireAssetId(req);
+    ok(res, requireRow(await assetDetailShape(id), '资产'));
   }));
   app.patch('/api/assets/:id', wrap(async (req: Request, res: Response) => {
     const id = await requireAssetId(req);
@@ -318,6 +321,9 @@ export function registerAssetRoutes(app: Express): void {
   }));
   app.delete('/api/assets/:id', wrap(async (req: Request, res: Response) => {
     const id = await requireAssetId(req);
+    /* 审计落资产**真实归属**的工作区：删的是谁的资产就记谁的账，
+     * 不写死 w-ops、也不照抄请求方声明的 workspaceId（requireAssetId 已校验两者一致）。 */
+    const ownerWorkspace = String((get<{ workspace_id: string }>('SELECT workspace_id FROM asset WHERE id = ?', id))?.workspace_id ?? '');
     /* 级联清理：asset_connection / credential_binding / asset_capability 有
      * REFERENCES asset(id) 外键（foreign_keys=ON），不先删子行主行删除会直接炸；
      * index_chunk / terminal_session / command_history 无外键但属于该资产的衍生物。 */
@@ -329,7 +335,7 @@ export function registerAssetRoutes(app: Express): void {
     run('DELETE FROM command_history WHERE asset_id = ?', id);
     run('DELETE FROM asset WHERE id = ?', id);
     writeAudit({
-      workspaceId: workspaceGuard(req) || 'w-ops', actor: (await identity(req)).name, source: 'user',
+      workspaceId: ownerWorkspace, actor: (await identity(req)).name, source: 'user',
       action: 'asset.delete', target: id, result: '成功', severity: 'warn',
       detail: `资产 ${id} 已删除，索引 / 凭据绑定 / 终端会话一并清理`,
     });

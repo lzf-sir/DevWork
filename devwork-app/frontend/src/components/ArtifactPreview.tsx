@@ -1,10 +1,10 @@
 /**
- * 文件查看（右栏工作台 · 文件 Tab）。
+ * 产物预览（侧边工作区 · 一个产物一个 tab）。
  *
- * 产物预览需要版面 —— 气泡里塞不下一个图或一段代码。所以点产物卡 / 产物行之后，
- * 真正的预览落在这里：左边是本会话的产物清单，下方是打开的标签页，右侧是激活产物的内容。
+ * 只做一件事：把**某一个文件**的内容渲染出来 —— 按扩展名分发渲染器，给下载入口。
+ * 产物清单不在这里：清单是「选择动作」，在会话右缘的产物浮层里（见 ChatHudDock），
+ * 选完才开这个详情 tab。工作区只装详情，不装列表。
  *
- * 多标签：产物开多少个都行（上限 12），点切换、点 × 关闭，中键也关。
  * 多格式按扩展名分发渲染器，不装成全能 —— 能渲染的如实渲染，不能的给下载：
  *   markdown → Markdown 组件（与会话气泡同一套安全渲染，不碰 raw HTML）；
  *   代码/文本 → highlight 高亮 + 行号（与代码库详情同一把高亮器）；
@@ -15,13 +15,12 @@
  *   图片     → 直接显示；
  *   二进制（docx/xlsx 等）→ 只给元信息与下载入口，不假装能渲染。
  */
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useStore } from '../store';
 import { api, type ArtifactPreview, type InlineSeg } from '../api/client';
-import { useLiveData } from '../api/live';
 import { highlight } from '../utils/highlight';
 import Markdown, { renderInline } from './Markdown';
-import { DownloadIcon, FileIcon } from './icons';
+import { DownloadIcon } from './icons';
 
 type ViewMode = 'markdown' | 'code' | 'json' | 'csv' | 'html' | 'pdf' | 'image' | 'binary';
 
@@ -240,27 +239,28 @@ function PreviewBody({ preview, mode }: { preview: ArtifactPreview; mode: ViewMo
   }
 }
 
-export default function FilePane(): React.ReactElement {
-  const { state, addToast, openArtifact, closeArtifact, setArtifactActive } = useStore();
-  const { OUTPUT_FILES } = useLiveData();
-  const tabs = state.artifactTabs;
-  const selected = state.artifactView;
+/** 产物引用：清单行、产物面板、工作区 tab 都用这一对 id/name。 */
+export interface ArtifactRef {
+  id: string;
+  name: string;
+}
 
-  const [preview, setPreview] = useState<ArtifactPreview | null>(null);
-  const [loading, setLoading] = useState<boolean>(false);
+/** 预览缓存：按产物 id 记住拉到的内容，切走再切回不重新请求。
+ *  进程级 Map 不做失效 —— 产物生成后不会被原地改写（重新生成 = 新 id / 新文件名）。 */
+const PREVIEW_CACHE = new Map<string, ArtifactPreview>();
+
+/** 单个产物的预览面板 —— 一个产物就是工作区的一个 tab。
+ *
+ *  这里只管「这一个文件怎么呈现」：拉预览、按格式分发渲染器、给下载入口。
+ *  清单与「开哪个」的决策在产物浮层里，不在这。 */
+export function ArtifactPreviewPane({ artifact }: { artifact: ArtifactRef }): React.ReactElement {
+  const { addToast } = useStore();
+  const [preview, setPreview] = useState<ArtifactPreview | null>(PREVIEW_CACHE.get(artifact.id) ?? null);
+  const [loading, setLoading] = useState<boolean>(!PREVIEW_CACHE.has(artifact.id));
   const [error, setError] = useState<string>('');
-  /* 预览缓存：切回已看过的标签不重新拉。Map 不触发渲染，读写走 ref。 */
-  const cacheRef = useRef<Map<string, ArtifactPreview>>(new Map());
 
-  /* 选中产物 → 拉预览。产物 id 可能来自产物清单（art-png）或卡片名（gmv_trend.png），
-   * 服务端两条都认（id OR file_name）。 */
   useEffect(() => {
-    if (!selected) {
-      setPreview(null);
-      setError('');
-      return;
-    }
-    const cached = cacheRef.current.get(selected.id);
+    const cached = PREVIEW_CACHE.get(artifact.id);
     if (cached) {
       setPreview(cached);
       setLoading(false);
@@ -270,33 +270,31 @@ export default function FilePane(): React.ReactElement {
     let alive = true;
     setLoading(true);
     setError('');
+    setPreview(null);
     void api
-      .getArtifactPreview(selected.id)
+      .getArtifactPreview(artifact.id)
       .then((envelope) => {
         if (!alive) return;
         setLoading(false);
         if (!envelope.ok) {
-          setPreview(null);
           setError(envelope.error?.message ?? '产物不存在');
           return;
         }
-        cacheRef.current.set(selected.id, envelope.data);
+        PREVIEW_CACHE.set(artifact.id, envelope.data);
         setPreview(envelope.data);
       })
       .catch(() => {
         if (!alive) return;
         setLoading(false);
-        setPreview(null);
         setError('预览请求失败');
       });
     return () => {
       alive = false;
     };
-  }, [selected?.id]);
+  }, [artifact.id]);
 
   const download = (): void => {
-    if (!selected) return;
-    void api.downloadArtifact(selected.id).then((envelope) => {
+    void api.downloadArtifact(artifact.id).then((envelope) => {
       if (!envelope.ok) {
         addToast(`下载失败：${envelope.error?.message ?? '产物不存在'}`);
         return;
@@ -315,87 +313,14 @@ export default function FilePane(): React.ReactElement {
 
   return (
     <div className="filp">
-      {/* 产物清单 */}
-      <div className="filp-list">
-        <div className="pt">本会话产物 {OUTPUT_FILES.length} 个</div>
-        {OUTPUT_FILES.length === 0 ? (
-          <div className="cempty">
-            <span className="cempty-ic">
-              <FileIcon size={14} strokeWidth={1.4} />
-            </span>
-            <span>本会话还没有产物。让 Agent 生成图表或文档后，这里会列出并可预览。</span>
-          </div>
-        ) : null}
-        {OUTPUT_FILES.map((file) => (
-          <div
-            className={`frow${selected?.name === file.name ? ' on' : ''}`}
-            key={file.name}
-            onClick={() => openArtifact({ id: file.id ?? file.name, name: file.name })}
-          >
-            <div className="fi" style={{ background: file.bg, color: file.fg }}>
-              {file.tag}
-            </div>
-            <div className="fn">{file.name}</div>
-            <span style={{ fontSize: 11, color: 'var(--gray-400)' }}>{file.size}</span>
-          </div>
-        ))}
-      </div>
-
-      {/* 打开的标签页：点击切换，× / 中键关闭 */}
-      {tabs.length > 0 ? (
-        <div className="filp-tabs" role="tablist" aria-label="已打开的产物">
-          {tabs.map((tab) => (
-            <div
-              className={`filp-tab${selected?.id === tab.id ? ' on' : ''}`}
-              key={tab.id}
-              role="tab"
-              aria-selected={selected?.id === tab.id}
-              title={tab.name}
-              onClick={() => setArtifactActive(tab.id)}
-              onAuxClick={(event) => {
-                if (event.button === 1) {
-                  event.preventDefault();
-                  closeArtifact(tab.id);
-                }
-              }}
-            >
-              <span className="filp-tab-name">{tab.name}</span>
-              <button
-                className="filp-tab-x"
-                type="button"
-                title="关闭"
-                aria-label={`关闭 ${tab.name}`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  closeArtifact(tab.id);
-                }}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-      ) : null}
-
-      {/* 预览区 */}
       <div className="filp-view">
-        {!selected ? (
-          <div className="filp-empty">
-            <span className="cempty-ic">
-              <FileIcon size={14} strokeWidth={1.4} />
-            </span>
-            <span>在上方选一个产物，或在会话里点产物卡「在侧边栏打开」。可同时打开多个，各自占一个标签。</span>
-          </div>
-        ) : null}
-        {selected ? (
-          <div className="filp-hd">
-            <span className="filp-name" title={selected.name}>{selected.name}</span>
-            {mode ? <span className="filp-kind">{MODE_LABEL[mode]}</span> : null}
-            <button className="brp-nav" type="button" title="下载原文件" aria-label="下载" onClick={download}>
-              <DownloadIcon size={13} strokeWidth={1.4} />
-            </button>
-          </div>
-        ) : null}
+        <div className="filp-hd">
+          <span className="filp-name" title={artifact.name}>{artifact.name}</span>
+          {mode ? <span className="filp-kind">{MODE_LABEL[mode]}</span> : null}
+          <button className="brp-nav" type="button" title="下载原文件" aria-label="下载" onClick={download}>
+            <DownloadIcon size={13} strokeWidth={1.4} />
+          </button>
+        </div>
         {loading ? <div className="filp-note">加载中…</div> : null}
         {error ? <div className="filp-note err">{error}</div> : null}
         {preview && !loading && mode ? <PreviewBody preview={preview} mode={mode} /> : null}

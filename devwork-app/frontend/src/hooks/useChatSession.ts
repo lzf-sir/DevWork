@@ -6,6 +6,11 @@
  *     就会出现「会话页能引用生产库、资产坞引用不到」；
  *  ② 发送链路（SSE 流式 / 附件 / 用量回写 / 中断）只有一条实现 ——
  *     资产坞如果自己写一份，"停止生成"就会中断不了它。
+ *
+ * 多 tab 之后新增一条：**所有「正在输入中」的状态都按会话分桶**。
+ * 草稿 / @ 选中的资产 / 待发附件放在模块级缓存（不进全局 store，
+ * 否则每敲一个字都要让整个应用重渲染一遍）；
+ * 流式文本放 store（tab 栏要能看见「哪个会话在生成」，跨组件可见）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store';
@@ -14,6 +19,41 @@ import { cardsToThread } from '../api/adapters';
 import { useLiveData, useLiveRefresh } from '../api/live';
 import { assetTypeIcon, assetTypeLabel, type AssetCandidate } from '../components/Composer';
 import { resolveAssetIds } from '../utils/composer';
+
+/** 附件条目：id 是服务端产物 id，name 是原始文件名。 */
+type Attachment = { id: string; name: string };
+
+/**
+ * 未发送的输入态缓存：conversationId → 内容。
+ *
+ * 为什么放模块级而不是 useRef / useState：
+ *   · useState 活不过 tab 切换（组件不重挂载，但参数变了要换一份）；
+ *   · useRef 同理，一份 ref 装不下多个会话；
+ *   · 放 store 会让每个按键都触发全局 context 更新，Markdown 长列表跟着重渲染。
+ * 模块级 Map 是这里唯一「按会话独立、又不惊动 React 树」的位置。
+ */
+interface DraftState {
+  text: string;
+  picked: AssetCandidate[];
+  attachments: Attachment[];
+}
+
+const draftCache = new Map<string, DraftState>();
+
+function readDraft(conversationId: string): DraftState {
+  return draftCache.get(conversationId) ?? { text: '', picked: [], attachments: [] };
+}
+
+function writeDraft(conversationId: string, patch: Partial<DraftState>): DraftState {
+  const next = { ...readDraft(conversationId), ...patch };
+  if (conversationId) draftCache.set(conversationId, next);
+  return next;
+}
+
+/** 会话被删除时清掉它的草稿，避免同名新会话继承旧字。 */
+export function clearDraftCache(conversationId: string): void {
+  draftCache.delete(conversationId);
+}
 
 /**
  * 可被 @ 引用的资产：live 用真实资产表，内置表只在断后端时兜底。
@@ -103,16 +143,55 @@ export function useConversationSender(
   options: SenderOptions = {},
 ): ConversationSender {
   const { boundAssetIds = [], assets = [] } = options;
-  const { state, sendMessage, appendAssistantCards, truncateThread, applyUsage, registerAbort, addToast } = useStore();
+  const { state, sendMessage, appendAssistantCards, truncateThread, applyUsage, registerAbort, addToast, setStream } = useStore();
   const refresh = useLiveRefresh();
 
-  const [draft, setDraft] = useState<string>('');
-  const [picked, setPicked] = useState<AssetCandidate[]>([]);
-  const [attachments, setAttachments] = useState<{ id: string; name: string }[]>([]);
+  /* 草稿 / @ 选中 / 待发附件：以 conversationId 为键，从模块级缓存取。
+   * conversationId 一变就从缓存回灌 —— 这就是「切 tab 字还在」的全部实现。 */
+  const [draftState, setDraftState] = useState<DraftState>(() => readDraft(conversationId));
+  useEffect(() => {
+    setDraftState(readDraft(conversationId));
+  }, [conversationId]);
+
+  const draft = draftState.text;
+  const picked = draftState.picked;
+  const attachments = draftState.attachments;
+
+  const setDraft = useCallback<React.Dispatch<React.SetStateAction<string>>>(
+    (value) => {
+      setDraftState((prev) => {
+        const text = typeof value === 'function' ? value(prev.text) : value;
+        return writeDraft(conversationId, { text });
+      });
+    },
+    [conversationId],
+  );
+
+  const setPicked = useCallback<React.Dispatch<React.SetStateAction<AssetCandidate[]>>>(
+    (value) => {
+      setDraftState((prev) => {
+        const next = typeof value === 'function' ? value(prev.picked) : value;
+        return writeDraft(conversationId, { picked: next });
+      });
+    },
+    [conversationId],
+  );
+
+  const setAttachments = useCallback<React.Dispatch<React.SetStateAction<Attachment[]>>>(
+    (value) => {
+      setDraftState((prev) => {
+        const next = typeof value === 'function' ? value(prev.attachments) : value;
+        return writeDraft(conversationId, { attachments: next });
+      });
+    },
+    [conversationId],
+  );
+
   const [uploading, setUploading] = useState<boolean>(false);
-  const [streamText, setStreamText] = useState<string | null>(null);
-  /** 流式增量的同步镜像：手动中断时用它把已收到的文本落进本地会话。 */
-  const streamTextCache = useRef<string>('');
+  /** 流式文本读 store 里按会话存的那一份：切换 tab 不丢，tab 栏也能据此点亮状态点。 */
+  const streamText = state.streams[conversationId] ?? null;
+  /** 流式增量的同步镜像（按会话）：手动中断时用它把已收到的文本落进本地会话。 */
+  const streamTextCache = useRef<Record<string, string>>({});
 
   const boundKey = boundAssetIds.join(',');
 
@@ -157,22 +236,24 @@ export function useConversationSender(
       };
 
       if (apiMode === 'live') {
-        setStreamText('');
-        streamTextCache.current = '';
-        /* 注册 AbortController —— 「停止生成」/ Esc 据此真中断流式请求。 */
+        setStream(conversationId, '');
+        streamTextCache.current[conversationId] = '';
+        /* 注册 AbortController（按会话）—— 「停止生成」/ Esc 据此真中断这一条流。 */
         const controller = new AbortController();
-        registerAbort(controller);
+        registerAbort(controller, conversationId);
         void api
           .streamMessage(conversationId, input, (delta) => {
-            streamTextCache.current += delta;
-            setStreamText((prev) => (prev ?? '') + delta);
+            const buffer = (streamTextCache.current[conversationId] ?? '') + delta;
+            streamTextCache.current[conversationId] = buffer;
+            setStream(conversationId, buffer);
           }, controller.signal)
           .then((envelope) => {
-            setStreamText(null);
-            registerAbort(null);
+            setStream(conversationId, null);
+            registerAbort(null, conversationId);
             if (!envelope.ok && envelope.error?.code === 'E_ABORTED') {
               /* 手动中断：保留已收到的增量文本，不再降级重发完整请求。 */
-              if (streamTextCache.current.trim()) appendTurn(undefined, streamTextCache.current);
+              const partial = streamTextCache.current[conversationId] ?? '';
+              if (partial.trim()) appendTurn(undefined, partial);
               addToast('已停止生成');
               void api.getUsage(conversationId).then((usage) => {
                 if (usage.ok) applyUsage(usage.data);
@@ -189,8 +270,8 @@ export function useConversationSender(
             });
           })
           .catch(() => {
-            setStreamText(null);
-            registerAbort(null);
+            setStream(conversationId, null);
+            registerAbort(null, conversationId);
             appendTurn(undefined, '网络异常，本轮回复未生成');
           });
         return;
@@ -208,7 +289,7 @@ export function useConversationSender(
         })
         .catch(() => appendTurn(undefined, '网络异常，本轮回复未生成'));
     },
-    [conversationId, state.conversationModels, sendMessage, appendAssistantCards, applyUsage, registerAbort, addToast, refresh],
+    [conversationId, state.conversationModels, sendMessage, appendAssistantCards, applyUsage, registerAbort, addToast, refresh, setStream],
   );
 
   const send = useCallback(

@@ -16,11 +16,14 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { adminCookie } from './lib/session.mjs';
+import { withWorkspace } from './lib/workspace.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BASE = process.env.DEVWORK_BASE ?? 'http://127.0.0.1:3001';
 const API = `${BASE}/api`;
 const ASSET = 'a-order-db-prod';
+/** ASSET 所属工作区（资产级请求必须显式声明）。 */
+const WORKSPACE = 'w-ops';
 
 const failures = [];
 const results = { total: 0, passed: 0, failed: 0 };
@@ -43,8 +46,10 @@ function check(group, name, expected, actual, ok, note = '') {
 async function call(method, urlPath, body, timeoutMs = 20000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  /* 资产级请求必须带 workspaceId（后端守卫缺省即拒）。 */
+  const target = withWorkspace(urlPath, WORKSPACE);
   try {
-    const res = await fetch(`${API}${urlPath}`, {
+    const res = await fetch(`${API}${target}`, {
       method,
       headers: body ? { 'Content-Type': 'application/json' } : undefined,
       body: body ? JSON.stringify(body) : undefined,

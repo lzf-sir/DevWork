@@ -160,8 +160,9 @@ const SUBMIT = `() => {
   return 'clicked';
 }`;
 
-/** 删掉刚建出来的测试资产（不污染开发库的侧栏）。 */
-const DELETE_ASSET = `(assetId) => fetch('/api/assets/' + assetId, { method: 'DELETE' })
+/** 删掉刚建出来的测试资产（不污染开发库的侧栏）。
+ *  资产级请求必须带 workspaceId —— 后端守卫缺省即拒。 */
+const DELETE_ASSET = `(assetId) => fetch('/api/assets/' + assetId + '?workspaceId=w-ops', { method: 'DELETE' })
   .then((r) => r.json()).then(() => 'deleted').catch(() => 'failed')`;
 
 /**

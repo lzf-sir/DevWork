@@ -16,7 +16,7 @@ interface PaletteItem {
 
 /** ⌘K 命令面板：搜索会话 / 资产 / 项目 / 命令，回车执行跳转。 */
 export default function CommandPalette(): React.ReactElement {
-  const { state, setPalette, navigate, setConversation, setWorkspace, setHudPane, setBenchTab, setRightCollapsed, setHelp, setModal, focusApproval, newConversation, setReadOnly, toggleLeft, toggleRight, addToast, addProject, setDetailTab, stopGeneration } =
+  const { state, setPalette, navigate, setConversation, setWorkspace, openBench, setArtifactPicker, setHelp, setModal, focusApproval, newConversation, setReadOnly, toggleLeft, toggleRight, addToast, addProject, setDetailTab, stopGeneration } =
     useStore();
   /* B2：审计列表由 REST 装配；B6：只读开关写服务端再同步本地状态。 */
   const { ORG_AUDIT } = useLiveData();
@@ -110,14 +110,14 @@ export default function CommandPalette(): React.ReactElement {
       { label: '新建会话', hint: '⌘N', run: newConversation },
       { label: '项目概览', hint: '⌘O', run: () => navigate('projects') },
       { label: '系统设置', hint: '⌘,', run: () => navigate('settings') },
+      { label: '智能体（工单 / 准入 / 账本）', hint: 'agent', run: () => navigate('shadow') },
       { label: '服务器终端', hint: 'detail-server', run: () => { navigate('detail-server'); setDetailTab('main'); } },
       { label: '数据库 SQL 查询', hint: 'detail-db', run: () => { navigate('detail-db'); setDetailTab('main'); } },
       { label: '代码库编辑器', hint: 'detail-code', run: () => { navigate('detail-code'); setDetailTab('main'); } },
-      { label: '会话右侧 · 上下文', hint: '气泡', run: () => { navigate('chat'); setHudPane('ctx'); } },
-      { label: '会话右侧 · 执行（待审批项）', hint: '气泡', run: () => { navigate('chat'); setHudPane('run'); } },
-      { label: '会话右侧 · 产物', hint: '气泡', run: () => { navigate('chat'); setHudPane('out'); } },
-      { label: '右栏 · 内置浏览器', hint: '', run: () => { navigate('chat'); setBenchTab('browser'); setRightCollapsed(false); } },
-      { label: '右栏 · 文件（产物预览）', hint: '', run: () => { navigate('chat'); setBenchTab('file'); setRightCollapsed(false); } },
+      { label: '工作区 · 上下文', hint: 'tab', run: () => { navigate('chat'); openBench('ctx'); } },
+      { label: '工作区 · 任务列表', hint: 'tab', run: () => { navigate('chat'); openBench('todo'); } },
+      { label: '工作区 · 内置浏览器', hint: 'tab', run: () => { navigate('chat'); openBench('browser'); } },
+      { label: '产物 · 选文件看详情', hint: '浮层', run: () => { navigate('chat'); setArtifactPicker(true); } },
       { label: '跳到待审批卡', hint: '', run: focusApproval },
       {
         label: '切换只读模式',
@@ -214,9 +214,8 @@ export default function CommandPalette(): React.ReactElement {
     navigate,
     addToast,
     setWorkspace,
-    setHudPane,
-    setBenchTab,
-    setRightCollapsed,
+    openBench,
+    setArtifactPicker,
     setHelp,
     setModal,
     focusApproval,

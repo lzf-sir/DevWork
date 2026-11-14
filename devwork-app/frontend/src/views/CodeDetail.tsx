@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { api } from '../api/client';
 import { useLiveData } from '../api/live';
+import { useAssetTarget } from '../hooks/useAssetTarget';
 import { Banner, DetailHeader, DetailTabs, GearSvg, KV, MetricGrid, Pill } from '../components/ui';
 import { CaretIcon, ChatIcon, CloseIcon, CodeIcon, DotsIcon, FolderIcon, FileTypeIcon } from '../components/icons';
 import AssetConfigDrawer from '../components/AssetConfigDrawer';
@@ -47,8 +48,10 @@ export default function CodeDetail(): React.ReactElement {
   const findInputRef = useRef<HTMLInputElement>(null);
   const codeRef = useRef<HTMLDivElement>(null);
 
-  /* 当前选中的代码库资产：详情页据此绑定**自己的**本地克隆目录，不再写死 a-order-service。 */
-  const assetId = state.activeAssetId || 'a-order-service';
+  /* 当前选中的代码库资产：详情页据此绑定**自己的**本地克隆目录，不再写死 a-order-service。
+   * 优先用用户刚点过的那个（它一定在本工作区），否则取本工作区第一个代码库资产。 */
+  const codeAsset = useAssetTarget('code');
+  const assetId = codeAsset?.id ?? '';
   /* 真实文件树（按资产拉取）；离线 / mock 模式回落 CODE_TREE。 */
   const [tree, setTree] = useState<TreeNode[]>([]);
   /* 本地仓库状态：本地路径 / 分支 / 提交 / 是否有未提交改动。 */

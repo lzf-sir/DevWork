@@ -1,9 +1,17 @@
 /**
  * SqlGuard —— 只读 SQL 防火墙（V3）。
  * 拒绝多语句 / DDL / DML / 危险关键字，自动追加 LIMIT 1000 并明示。
- * 引号与注释内的危险关键字同样检测（防绕过）。
+ *
+ * 危险关键字按**整串**检测（含引号与注释内）—— 这是本文件既有的防绕过立场：
+ * 一旦关键字扫描只看代码区，`SELECT 'DROP'` 就能把危险关键字藏进字面量，
+ * 靠关键字白名单做裁决就不再可靠。多语句与首关键字才需要引号感知
+ * （字面量里的分号不是语句分隔符，字面量里的字母不是首关键字）。
+ *
+ * 执行用**原文**：早期版本用正则剥注释后执行，`SELECT '--x'` 这类语句
+ * 会被剥成残句（语法错误），写通道里还会把 `VALUES('--x')` 的内容吃掉。
  */
 import { ApiFailure } from '../http/core';
+import { firstWordOf, hasTopLevelSemicolon, scanSql } from './sql-scan';
 
 export interface GuardResult {
   sql: string;
@@ -25,47 +33,21 @@ const FORBIDDEN = [
 
 const FIRST_KEYWORDS = ['SELECT', 'WITH', 'EXPLAIN'];
 
-/** 去掉行注释与块注释（保留字符串字面量内容）。 */
-function stripComments(sql: string): string {
-  return sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
-}
-
 /**
  * 查找「顶层」LIMIT 子句：忽略子查询括号内的 LIMIT，也忽略字符串字面量里的
  * 伪关键字。返回最后一个顶层 LIMIT 的位置与取值，供 ④ 判断是否追加 / 改写。
- * 引号感知（单引号 '' 与双引号 "" 转义）与括号深度扫描都在这里真正生效，
- * 不再保留 QA 指出的「算完不用」的死代码。
+ *
+ * 位置在 execSql 上定位（与 codeMask 等长），因此改写后原文字面量原样保留。
  */
-function findTopLevelLimit(sql: string): { found: boolean; value: number; start: number; end: number } {
-  const regex = /\bLIMIT\s+(\d+)/gi;
+function findTopLevelLimit(sql: string, codeMask: string): { found: boolean; value: number; start: number; end: number } {
+  const regex = /\bLIMIT\s+(-?\d+)/gi;
   const topLevel: boolean[] = [];
-  const quote: (string | null)[] = [];
-  let activeQuote: string | null = null;
   let depth = 0;
   for (let i = 0; i < sql.length; i += 1) {
     const char = sql[i];
-    quote[i] = activeQuote;
-    if (activeQuote) {
-      if (char === activeQuote) {
-        if (sql[i + 1] === activeQuote) {
-          quote[i + 1] = activeQuote;
-          i += 1;
-        } else {
-          activeQuote = null;
-        }
-      }
-      topLevel[i] = false;
-      continue;
-    }
-    if (char === '\'' || char === '"') {
-      activeQuote = char;
-      quote[i] = char;
-      topLevel[i] = false;
-      continue;
-    }
-    topLevel[i] = depth === 0;
     if (char === '(') depth += 1;
     else if (char === ')') depth = Math.max(0, depth - 1);
+    topLevel[i] = depth === 0;
   }
 
   let found = false;
@@ -75,8 +57,9 @@ function findTopLevelLimit(sql: string): { found: boolean; value: number; start:
   let match: RegExpExecArray | null;
   while ((match = regex.exec(sql)) !== null) {
     const at = match.index;
-    // 仅接受位于顶层、且不在引号内的 LIMIT；子查询里的 LIMIT 不算。
-    if (!topLevel[at] || quote[at] !== null) continue;
+    // 仅接受位于顶层、且不在字面量/注释内的 LIMIT；子查询里的 LIMIT 不算。
+    if (!topLevel[at]) continue;
+    if (codeMask.slice(at, at + match[0].length).trim() === '') continue;
     found = true;
     value = Number(match[1]);
     start = at;
@@ -94,16 +77,19 @@ export function guard(raw: string, maxRows = 1000): GuardResult {
     });
   }
 
-  /* ③ 全串扫描危险关键字（引号 / 注释内同样检测）。 */
-  const upper = statement.toUpperCase();
-  const detected = FORBIDDEN.filter((keyword) => new RegExp(`\\b${keyword}\\b`, 'i').test(upper));
+  /* 引号 / 注释感知的扫描：多语句与首关键字只看代码区。 */
+  const scan = scanSql(statement);
+  const codeMask = scan.codeMask;
 
-  /* ① 去注释后非末尾单分号 → 多语句。 */
-  const cleaned = stripComments(statement).trim().replace(/;+\s*$/, '').trim();
-  const multiStatement = /;/.test(cleaned);
+  /* ③ 危险关键字扫描（整串，含引号与注释内）—— 防绕过立场：
+   *    关键字若能藏进字面量或注释，扫描就等于没做。 */
+  const detected = FORBIDDEN.filter((keyword) => new RegExp(`\\b${keyword}\\b`, 'i').test(statement));
+
+  /* ① 代码区里的分号 → 多语句（末尾分号已去除）。 */
+  const multiStatement = hasTopLevelSemicolon(codeMask.replace(/;+\s*$/, ''));
 
   /* ② 首关键字必须 SELECT / WITH / EXPLAIN。 */
-  const firstWord = (cleaned.match(/^\s*([A-Za-z]+)/)?.[1] ?? '').toUpperCase();
+  const firstWord = firstWordOf(codeMask);
   const validFirst = FIRST_KEYWORDS.includes(firstWord);
 
   if (detected.length > 0 || multiStatement || !validFirst) {
@@ -118,17 +104,18 @@ export function guard(raw: string, maxRows = 1000): GuardResult {
     );
   }
 
-  /* ④ 顶层 LIMIT：无则追加，>maxRows 替换。 */
-  const limit = findTopLevelLimit(cleaned);
-  let sql = cleaned;
+  /* ④ 顶层 LIMIT：无则追加，>maxRows 替换。
+   * 改写作用在 execSql 上 —— 字面量内容原样保留，不会被清洗结果改写。 */
+  const limit = findTopLevelLimit(scan.execSql, codeMask);
+  let sql = scan.execStatement;
   let injected = false;
   let appliedLimit = limit.value;
   if (!limit.found) {
-    sql = `${cleaned}\nLIMIT ${maxRows}`;
+    sql = `${scan.execStatement}\nLIMIT ${maxRows}`;
     injected = true;
     appliedLimit = maxRows;
   } else if (limit.value > maxRows) {
-    sql = `${cleaned.slice(0, limit.start)}LIMIT ${maxRows}${cleaned.slice(limit.end)}`;
+    sql = `${scan.execSql.slice(0, limit.start)}LIMIT ${maxRows}${scan.execSql.slice(limit.end)}`.trim();
     appliedLimit = maxRows;
   }
   return {
@@ -136,7 +123,7 @@ export function guard(raw: string, maxRows = 1000): GuardResult {
     guard: {
       injected,
       appliedLimit,
-      notice: injected ? '已自动追加 LIMIT 1000' : `LIMIT 已限制为 ${appliedLimit}`,
+      notice: injected ? `已自动追加 LIMIT ${maxRows}` : `LIMIT 已限制为 ${appliedLimit}`,
     },
     detected,
     statement,

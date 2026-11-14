@@ -2,39 +2,83 @@ appId: com.devwork.desktop
 productName: DevWork
 copyright: DevWork local demo
 asar: true
+
+# 本项目没有需要按 Electron ABI 重编的原生模块（esbuild 的平台二进制在 resources 里，
+# 不参与 Electron 的 ABI）。默认的 @electron/rebuild 每次打包都会全量扫描一遍 node_modules，
+# 关掉可省掉这段时间。
+npmRebuild: false
+
 directories:
   output: release
   buildResources: desktop
-# asar 里只放桌面壳本身（desktop/main.cjs / desktop/preload.cjs / package.json）。
+
+# asar 里放桌面壳 + 生产依赖（含 electron-updater 的传递依赖）。
 # 后端运行时**不进 asar**：它是独立的 Node 进程，读不了 asar 内部的文件，
-# 必须以真实目录形式落在 resources/server 下（由 scripts/package.mjs 暂存）。
+# 必须以真实目录形式落在 resources/server 下（由 scripts/lib/stage-runtime.mjs 暂存）。
+#
+# 注意 node_modules：这里**不能**排除。main.cjs 在 asar 内 require('electron-updater')，
+# 上一版配置写了 '!node_modules/**'，装了更新器也打不进去，运行时直接 MODULE_NOT_FOUND。
+# electron-builder 默认只打 dependencies，devDependencies（electron / vite / typescript）不会进来。
 files:
   - desktop/**/*
   - package.json
-  - '!node_modules/**'
+  - node_modules/**/*
+  - '!node_modules/.bin/**'
+  - '!node_modules/.cache/**'
+
 extraResources:
   # 前端构建产物：后端用 Express 同源托管，桌面端直接加载 127.0.0.1:3001。
   - from: dist
     to: dist
-  # 服务端运行时（源码 + express/cors/tsx/esbuild），见 scripts/package.mjs 的 stageRuntime()。
+  # 服务端运行时（源码 + express/cors/tsx/esbuild），见 scripts/lib/stage-runtime.mjs。
   - from: build/pkg/server
     to: server
+  # 契约层：后端以 ../../../shared/contracts 引用，必须与 server 同级落在 resources/shared，
+  # 相对路径才对得上（resources/server/src/routes → ../../../ = resources/）。
+  - from: build/pkg/shared
+    to: shared
   # 内置 Node 22 运行时：**这是"免安装也能跑"的前提**。
   # 后端是独立 Node 进程且依赖 node:sqlite（Node 22.5+ 才有），而 Electron 33
   # 自带的是 Node 20.x，不带 node:sqlite。目标机没装 Node 就只能看到报错页。
-  # 由 scripts/package.mjs 把当前构建用的 node.exe 暂存到这里。
   - from: build/pkg/runtime/node.exe
     to: runtime/node.exe
+
+# 自动更新：与 DeepSeek Harness 桌面端同款 generic provider。
+# 打包时**不上传**（--publish never），只在本地生成 stable.yml + *.blockmap；
+# 真正上架时用 DEVWORK_UPDATE_URL 覆盖这个地址即可，不必改文件。
+publish:
+  provider: generic
+  url: https://update.devwork.example/desktop
+  channel: stable
+
 win:
-  # 默认目标：portable —— 单文件 exe，免安装，双击即用。
-  # 需要 NSIS 安装包时用 scripts/package.mjs --installer。
-  target: portable
+  # 三种产物，按需选：
+  #   zip      默认。纯压缩包，不含自解压/安装器逻辑 —— 安全软件不会拦「执行」，
+  #            用户自己解压后用里面的 DevWork.exe 启动。
+  #   nsis     安装包（开始菜单/卸载/自动更新齐全）
+  #   portable 单文件免安装（自解压到临时目录运行）
+  target:
+    - target: zip
+      arch: [x64]
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  artifactName: DevWork-${version}-win-${arch}.${ext}
   # 跳过 rcedit（写 exe 版本信息）与签名：这台机器上杀软会在 exe 落盘后立刻
   # 打开扫描，rcedit 回写失败（"Unable to commit changes"）会让整次打包挂掉。
-  # 版本信息是装饰性的，程序本身不依赖它；打包脚本会在事后尽力补写。
+  # 版本信息是装饰性的，程序本身不依赖它。
   signAndEditExecutable: false
-# 架构不在配置里写：electron-builder 25 的 schema 里 win 下没有 arch 字段，
-# 架构由命令行 --x64 / --arm64 决定（scripts/package.mjs 已带 --win --x64）。
+
 nsis:
   oneClick: false
+  perMachine: false
   allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: DevWork
+  # 安装包与便携版分开命名，避免同目录下互相覆盖。
+  artifactName: DevWork-Setup-${version}-win-${arch}.${ext}
+
+portable:
+  artifactName: DevWork-${version}-win-${arch}-portable.${ext}

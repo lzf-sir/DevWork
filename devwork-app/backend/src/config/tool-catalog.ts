@@ -50,6 +50,26 @@ function schemaOf(entry: CatalogEntry): Record<string, unknown> {
 export const TOOL_CATALOG: CatalogEntry[] = [
   /* ---- 跨资产通用 ---- */
   {
+    /* 任务清单：长任务先拆步、再逐步推进。这条工具**任何工作区都有**（assetType
+     * 为 workspace），因为它操作的是 Agent 自己的计划状态，不是用户资产。 */
+    name: 'todo_write', group: 'common', assetType: 'workspace',
+    action: 'todo.plan', risk: 'low', version: 'v1',
+    label: '任务清单', needsCredential: false,
+    description: [
+      '维护本次任务的计划清单（清单卡片原位更新，用户会实时看到进度）。',
+      '长任务（预计超过 3 个动作）先一次性拆成 3~7 步再动手；每完成一步立刻回传',
+      '完整清单并把该步 status 改成 done。status 只能是 pending / doing / done / blocked，',
+      '卡住就标 blocked 并在 note 里写卡在哪，不要为了"看起来完成"把没做的标 done。',
+    ].join(''),
+    params: {
+      items: {
+        type: 'array',
+        description: '清单项数组（建议全量回传）：[{ id?, title, status?, note? }]；id 可省略，按标题自动对上已有项',
+      },
+    },
+    required: ['items'],
+  },
+  {
     name: 'ws_list_assets', group: 'common', assetType: 'workspace',
     action: 'asset.read', risk: 'low', version: 'v1',
     label: '资产清单', needsCredential: false,

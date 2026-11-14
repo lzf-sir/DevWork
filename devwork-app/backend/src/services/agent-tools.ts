@@ -22,6 +22,7 @@ import { PORT, browserAllowPrivate } from '../config';
 import type { Identity } from '../http/core';
 import type { CitationSeed, ToolExecutionResult } from './llm-gateway';
 import type { DerivedTool } from '../config/tool-catalog';
+import { writeTodoPlan } from './todo';
 
 export interface ToolContext {
   assetId: string;
@@ -95,6 +96,26 @@ export async function executeAgentTool(
   const assetId = tool?.assetId ?? ctx.assetId;
 
   switch (toolName) {
+    /* ---- 任务清单（Agent 自身状态，任何工作区都可用）---- */
+    case 'todo_write': {
+      /* 只写「计划状态」，不碰磁盘。这里不做任何"假装推进"：模型传什么就记什么，
+       * 进度由 todo.ts 从 status 数出来，不接受模型自报的完成数。 */
+      try {
+        const { plan, created } = writeTodoPlan(ctx.conversationId, args.items);
+        const blocked = plan.items.filter((item) => item.status === 'blocked').map((item) => item.title);
+        return {
+          ok: true,
+          result: [
+            `任务清单已${created ? '建立' : '更新'}（第 ${plan.revision} 版）：${plan.progress.done}/${plan.progress.total} 完成`,
+            plan.items.map((item, index) => `${index + 1}. [${item.status}] ${item.title}`).join('\n'),
+            blocked.length > 0 ? `受阻项：${blocked.join(' / ')}（先解决或如实报告，不要跳过）` : '',
+          ].filter(Boolean).join('\n'),
+        };
+      } catch (error) {
+        return { ok: false, result: `清单未更新：${error instanceof Error ? error.message : String(error)}` };
+      }
+    }
+
     /* ---- 通用 ---- */
     case 'ws_list_assets': {
       const rows = all<Record<string, unknown>>(

@@ -112,8 +112,22 @@ export function optionalId(value: unknown): string | null {
   return typeof value === 'string' && value !== '' ? value : null;
 }
 
+/**
+ * 工作区归属强校验 —— **缺省即拒**。
+ *
+ * 之前这里是 `if (requested && requested !== resourceWorkspaceId)`：
+ * 请求方没带 workspaceId 就整段跳过校验，于是「不带工作区标识」等于
+ * 「可访问任意工作区的资源」，工作区隔离形同虚设。
+ *
+ * 现在：请求方必须显式声明工作区，缺失或与资源实际归属不符都判
+ * E_WORKSPACE_MISMATCH（409）。服务端没有账号体系，query 里的
+ * workspaceId 是唯一可用的声明来源，因此「不声明」不能被当作「放行」。
+ */
 export function assertWorkspace(resourceWorkspaceId: string, requested: string): void {
-  if (requested && requested !== resourceWorkspaceId) {
+  if (!requested) {
+    throw new ApiFailure('E_WORKSPACE_MISMATCH', '缺少工作区标识（workspaceId），拒绝访问该资源');
+  }
+  if (requested !== resourceWorkspaceId) {
     throw new ApiFailure('E_WORKSPACE_MISMATCH', `资源不属于工作区 ${requested}（实际 ${resourceWorkspaceId}）`);
   }
 }

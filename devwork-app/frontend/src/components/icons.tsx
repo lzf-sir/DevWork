@@ -293,6 +293,27 @@ export function TerminalIcon({ size, strokeWidth, className }: IconProps): React
   );
 }
 
+/** 地球：内置浏览器。 */
+export function GlobeIcon({ size, strokeWidth, className }: IconProps): React.ReactElement {
+  return (
+    <Svg size={size} strokeWidth={strokeWidth} className={className}>
+      <circle cx="8" cy="8" r="6.1" />
+      <path d="M1.9 8h12.2M8 1.9c1.7 1.9 2.5 3.9 2.5 6.1S9.7 12.1 8 14.1C6.3 12.1 5.5 10.1 5.5 8S6.3 3.8 8 1.9z" />
+    </Svg>
+  );
+}
+
+/** 任务清单：勾选框 + 两行待办。 */
+export function TodoIcon({ size, strokeWidth, className }: IconProps): React.ReactElement {
+  return (
+    <Svg size={size} strokeWidth={strokeWidth} className={className}>
+      <path d="M2.6 4.2l1.3 1.3L6.3 3.1" />
+      <path d="M2.6 10.2l1.3 1.3 2.4-2.4" />
+      <path d="M8.6 5.1h4.8M8.6 11h4.8" />
+    </Svg>
+  );
+}
+
 /** 模型 / 芯片。 */
 export function ModelIcon({ size, strokeWidth, className }: IconProps): React.ReactElement {
   return (

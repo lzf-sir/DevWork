@@ -22,6 +22,8 @@ import { registerSqlRoutes } from './sql';
 import { registerFileRoutes } from './files';
 import { registerSettingsRoutes } from './settings';
 import { registerAuditRoutes } from './audit';
+import { registerShadowRoutes } from './shadow';
+import { registerTicketRoutes } from './tickets';
 
 export function registerRoutes(app: Express): void {
   /* 装配顺序沿用原文件的相对次序：audit/export 先于 audit/:id、
@@ -39,6 +41,8 @@ export function registerRoutes(app: Express): void {
   registerFileRoutes(app);
   registerSettingsRoutes(app);
   registerAuditRoutes(app);
+  registerShadowRoutes(app);
+  registerTicketRoutes(app);
 
   app.use('/api', (_req, res) => {
     fail(res, 'E_NOT_FOUND', '未找到对应的 REST 端点', 404);

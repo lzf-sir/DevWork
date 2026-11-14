@@ -13,6 +13,7 @@ import type {
   InlineSeg,
   Message,
   MessageCard,
+  Project,
   Sidebar as SidebarPayload,
   SidebarData,
 } from './client';
@@ -87,6 +88,51 @@ export function toFrontendMessage(card: MessageCard): Message | null {
         level: payload.level === 'info' ? 'info' : 'warn',
         title: String(payload.title ?? '提示'),
         content: String(payload.content ?? ''),
+        usage,
+      };
+    case 'todo': {
+      /* 进度以服务端 progress 为准；缺省时按状态数自己算（同一个口径，不是两套规则）。 */
+      const rawItems = Array.isArray(payload.items) ? (payload.items as Record<string, unknown>[]) : [];
+      const items = rawItems.map((item, index) => {
+        const status = String(item.status ?? '');
+        const normalized: 'pending' | 'doing' | 'done' | 'blocked' =
+          status === 'done' || status === 'doing' || status === 'blocked' ? status : 'pending';
+        return {
+          id: String(item.id ?? `t${index + 1}`),
+          title: String(item.title ?? ''),
+          status: normalized,
+          ...(item.note ? { note: String(item.note) } : {}),
+        };
+      }).filter((item) => item.title !== '');
+      const rawProgress = (payload.progress ?? {}) as Record<string, unknown>;
+      const done = Number(rawProgress.done ?? items.filter((item) => item.status === 'done').length);
+      const total = Number(rawProgress.total ?? items.length);
+      return {
+        id: card.id,
+        kind: 'todo',
+        items,
+        progress: {
+          done,
+          total,
+          doing: Number(rawProgress.doing ?? items.filter((item) => item.status === 'doing').length),
+          blocked: Number(rawProgress.blocked ?? items.filter((item) => item.status === 'blocked').length),
+          percent: Number(rawProgress.percent ?? (total > 0 ? Math.round((done / total) * 100) : 0)),
+        },
+        degraded: payload.degraded === true,
+        usage,
+      };
+    }
+    case 'summary':
+      return {
+        id: card.id,
+        kind: 'summary',
+        content: String(payload.content ?? ''),
+        source: payload.source === 'model' ? 'model' : 'rule',
+        mode: payload.mode === 'manual' ? 'manual' : 'auto',
+        messages: Number(payload.messages ?? 0),
+        freedTokens: Number(payload.freedTokens ?? 0),
+        at: String(payload.at ?? ''),
+        ...(payload.model ? { model: String(payload.model) } : {}),
         usage,
       };
     case 'tool_row':
@@ -207,4 +253,44 @@ export function toSidebarData(raw: SidebarPayload): SidebarData {
     convFolders,
     looseConvs: ((raw.looseConvs ?? []) as unknown as Dict[]).map(convLeaf),
   };
+}
+
+/** 解析出来的资产目标：id 之外还带名称，详情页标题用。 */
+export interface AssetTarget {
+  id: string;
+  name: string;
+  env?: string;
+}
+
+/**
+ * 在指定工作区的侧栏里找出某类资产（code / db / server / kb）。
+ *
+ * 为什么需要它：详情页原先把资产 id 写死成 w-ops 的演示资产
+ * （a-order-db-prod / a-order-api / a-kb）。后端工作区守卫收紧后，
+ * 切到别的工作区再打开这些页面，请求会被判成跨工作区访问（409）。
+ * 现在改成「按当前工作区 + 资产类型」解析 —— 解析不到就返回 null，
+ * 页面保持空态，而不是拿别的资产的 id 去撞后端。
+ *
+ * preferredId 是用户刚点过的资产：它在本工作区且类型对得上就用它，
+ * 否则回落到该工作区侧栏里第一个同类资产（遍历顺序与展示顺序一致）。
+ */
+export function resolveAssetTarget(
+  projects: Project[],
+  workspaceId: string,
+  go: AssetGo,
+  preferredId?: string,
+): AssetTarget | null {
+  const project = projects.find((item) => item.id === workspaceId);
+  if (!project) return null;
+  const sidebar = project.sidebar;
+  const leaves: AssetItem[] = [];
+  for (const folder of sidebar.assetFolders) {
+    leaves.push(...folder.items);
+    for (const sub of folder.subFolders ?? []) leaves.push(...sub.items);
+  }
+  leaves.push(...sidebar.looseAssets);
+  const preferred = preferredId ? leaves.find((item) => item.id === preferredId && item.go === go) : undefined;
+  const hit = preferred ?? leaves.find((item) => item.go === go);
+  if (!hit) return null;
+  return { id: hit.id, name: hit.name, env: hit.env };
 }

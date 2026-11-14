@@ -66,6 +66,39 @@ export type {
   TruncateMessagesInput,
   TruncateMessagesResult,
   TurnUsage,
+  ContextUsage,
+  CompactionResult,
+  TodoStatus,
+  TodoProgressView,
+  ShadowDecision,
+  ShadowPolicy,
+  ShadowStats,
+  ShadowStatus,
+  ShadowTrigger,
+  ShadowScheduleConfig,
+  ShadowMandate,
+  ShadowTicket,
+  TicketDetail,
+  TicketStats,
+  WaitingSnapshot,
+  WaitingTicket,
+} from './types';
+
+/* 影子链路（P1）类型：只在「影子决策」页消费，单独引一行。
+ * 注意上面那一大块是 `export type { } from './types'` —— 那是**再导出**，
+ * 不产生本地绑定。所以这里必须单独 import 一次，不能省。 */
+import type {
+  ShadowDecision,
+  ShadowMandate,
+  ShadowTicket,
+  TicketDetail,
+  TicketStats,
+  WaitingSnapshot,
+  ShadowPolicy,
+  ShadowStats,
+  ShadowStatus,
+  ShadowTrigger,
+  ShadowScheduleConfig,
 } from './types';
 
 import { mockFallthrough } from './mock';
@@ -96,7 +129,10 @@ import type {
   CloneRepoResult,
   CommandHistory,
   CommandSuggestion,
+  CompactionResult,
+  CompactContextInput,
   ContextPanel,
+  ContextUsage,
   Conversation,
   ConversationInput,
   Credential,
@@ -171,6 +207,43 @@ export function wasLastRequestFallback(): boolean {
   return lastRequestFallback;
 }
 
+/* ── 当前工作区（客户端唯一来源）────────────────────────────────────────
+ * 后端的工作区守卫是「缺省即拒」：资产级请求不带 workspaceId 一律 409。
+ * 而工作区切换发生在 store 层，api 层拿不到 React 状态 —— 于是这里维护
+ * 一个模块级单例，由 store 在切换时同步过来，请求出口统一注入。
+ *
+ * 与 apiMode 同风格：模块级可变单例（不做 React 状态，避免 api 层反向依赖组件）。
+ */
+let currentWorkspaceId = 'w-ops';
+
+export function getCurrentWorkspaceId(): string {
+  return currentWorkspaceId;
+}
+
+/** 切换工作区时同步过来（store.setWorkspace / hydrateFromRest 调用）。 */
+export function setCurrentWorkspaceId(id: string): void {
+  if (id) currentWorkspaceId = id;
+}
+
+/** 资产作用域路径：`/assets/<id>/...`。 */
+const ASSET_SCOPE = /^\/assets\/[^/?]+/;
+
+/**
+ * 给资产级请求补上 workspaceId。
+ *
+ * 后端守卫缺省即拒，而资产级请求有 30+ 个调用点，逐个补 query 迟早漏。
+ * 统一在唯一出口注入：已显式带 workspaceId 的不覆盖（显式值优先）。
+ */
+function withWorkspaceScope(path: string): string {
+  if (!ASSET_SCOPE.test(path)) return path;
+  if (!currentWorkspaceId) return path;
+  const [clean, query = ''] = path.split('?');
+  const params = new URLSearchParams(query);
+  if (params.has('workspaceId')) return path;
+  params.set('workspaceId', currentWorkspaceId);
+  return `${clean}?${params.toString()}`;
+}
+
 function requestId(): string {
   return `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -210,8 +283,10 @@ export function request<T>(
   const timeoutMs = opts?.timeoutMs ?? 2500;
   const signal = opts?.signal ?? AbortSignal.timeout(timeoutMs);
   lastRequestFallback = false;
+  /* 资产级请求在这里统一补 workspaceId（唯一注入点）。 */
+  const target = withWorkspaceScope(path);
 
-  return fetch(BASE + path, {
+  return fetch(BASE + target, {
     method,
     headers: {
       'Content-Type': 'application/json',
@@ -243,7 +318,8 @@ export function request<T>(
       }
       lastRequestFallback = true;
       apiMode = 'mock';
-      return mockFallthrough<T>(method, path, body);
+      /* 传 target：mock 侧 parsePath 会拆 clean/query，路由匹配不受影响。 */
+      return mockFallthrough<T>(method, target, body);
     });
 }
 
@@ -411,6 +487,12 @@ export const api: ApiClient = {
   getExecutionPanel: (conversationId: string) => request<ExecutionPanel>('GET', `/conversations/${enc(conversationId)}/execution`),
   getArtifactPanel: (conversationId: string) => request<ArtifactPanel>('GET', `/conversations/${enc(conversationId)}/artifacts`),
   getUsage: (conversationId: string) => request<Usage>('GET', `/conversations/${enc(conversationId)}/usage`),
+  /* 上下文用量明细：输入框小按钮读它（占用 / 预算 / 构成 / 上次压缩）。 */
+  getContextUsage: (conversationId: string, model?: string) =>
+    request<ContextUsage>('GET', `/conversations/${enc(conversationId)}/context-usage${qs({ model })}`),
+  /* 手动压缩：可能要真调一次模型做摘要，所以超时给到 90s（默认 2.5s 会把正常请求掐死）。 */
+  compactContext: (conversationId: string, input?: CompactContextInput) =>
+    request<CompactionResult>('POST', `/conversations/${enc(conversationId)}/compact`, input ?? {}, { timeoutMs: 90000 }),
   downloadArtifact: (artifactId: string) =>
     request<{ url: string; fileName: string; sizeBytes: number }>('GET', `/artifacts/${enc(artifactId)}/download`),
   /* 产物预览（右栏「文件」Tab）：文本给内容、图片给 URL、二进制只给元信息。 */
@@ -530,4 +612,85 @@ export const api: ApiClient = {
     request<{ content: string; fileName: string; auditId: string; exported: number; total: number }>(
       'POST', '/audit/export', query,
     ),
+
+  /* ---- 影子链路（P1：只记录，不执行） ----
+   * 这组端点全部无执行副作用：改策略 / 开关源只写 setting 与 source，
+   * 「立即研判」只跑一次 tick，不建工单、不调工具。 */
+  /* 影子端点放宽到 8s：默认 2.5s 是给「交互式读」定的，而这一页在应用启动的
+   * 同一个瞬间并发 4 个请求，启动高峰下 2.5s 会把其中一两个打回 mock（表现为数字全 0）。 */
+  getShadowStatus: () => request<ShadowStatus>('GET', '/shadow/status', undefined, { timeoutMs: 8000 }),
+  getShadowStats: () => request<ShadowStats>('GET', '/shadow/stats', undefined, { timeoutMs: 8000 }),
+  listShadowDecisions: (query) =>
+    request<{ items: ShadowDecision[]; total: number }>(
+      'GET',
+      `/shadow/decisions${qs({
+        limit: query?.limit,
+        wouldAccept: query?.wouldAccept ? 1 : undefined,
+        reason: query?.reason,
+      })}`,
+      undefined,
+      { timeoutMs: 8000 },
+    ),
+  listShadowTriggers: (query) =>
+    request<{ items: ShadowTrigger[]; total: number }>(
+      'GET',
+      `/shadow/triggers${qs({
+        limit: query?.limit,
+        disposition: query?.disposition,
+        threadKey: query?.threadKey,
+      })}`,
+      undefined,
+      { timeoutMs: 8000 },
+    ),
+  /* 一次 tick 最多研判 20 条，给足 15s；超时会被前端当成失败，宁可等也别误报。 */
+  runShadowTick: () =>
+    request<{ picked: number; evaluated: number; skipped: number }>('POST', '/shadow/tick', {}, { timeoutMs: 15000 }),
+  updateShadowPolicy: (patch) => request<ShadowPolicy>('PATCH', '/shadow/policy', patch),
+  setShadowSource: (kind, enabled, schedule) =>
+    request<{ kind: string; enabled: boolean }>('PATCH', '/shadow/sources', { kind, enabled, schedule }),
+  fireShadowSource: (kind) =>
+    request<{ triggerId: string; threadId: string; created: boolean }>('POST', '/shadow/sources/fire', { kind }),
+  listShadowMandates: (query) =>
+    request<{ items: ShadowMandate[]; total: number }>(
+      'GET',
+      `/shadow/mandates${qs({ limit: query?.limit, status: query?.status })}`,
+      undefined,
+      { timeoutMs: 8000 },
+    ),
+  reviewShadowMandate: (id, input) =>
+    request<ShadowMandate>('POST', `/shadow/mandates/${enc(id)}/review`, input, { timeoutMs: 8000 }),
+
+  setShadowEnabled: (enabled) => request<{ enabled: boolean }>('PATCH', '/shadow/enabled', { enabled }),
+  exportShadowCsv: (limit) =>
+    request<{ content: string; fileName: string; rows: number }>(
+      'GET', `/shadow/export${qs({ limit })}`, undefined, { timeoutMs: 15000 },
+    ),
+
+  /* ---- 工单（P2） ---- */
+  listTickets: (query) =>
+    request<{ items: ShadowTicket[]; total: number }>(
+      'GET',
+      `/tickets${qs({ limit: query?.limit, stage: query?.stage, state: query?.state })}`,
+      undefined,
+      { timeoutMs: 8000 },
+    ),
+  getTicketStats: () => request<TicketStats>('GET', '/tickets/stats', undefined, { timeoutMs: 8000 }),
+  /** 待人清单：侧栏徽标会话 tab 橙点共用。超时压到 6 秒 ——
+   *  它是「有没有人等你」的探针，慢到卡住不如尽快报错让上层保留上一次结果。 */
+  getWaitingTickets: (limit) =>
+    request<WaitingSnapshot>('GET', `/tickets/waiting${qs({ limit })}`, undefined, { timeoutMs: 6000 }),
+  /** 按会话反查工单（协作流视图）：一次拿齐详情，前端不串 /tickets/:id。 */
+  listConversationTickets: (id, limit) =>
+    request<{ items: TicketDetail[]; total: number }>(
+      'GET',
+      `/conversations/${enc(id)}/tickets${qs({ limit })}`,
+      undefined,
+      { timeoutMs: 8000 },
+    ),
+  getTicket: (id) => request<TicketDetail>('GET', `/tickets/${enc(id)}`, undefined, { timeoutMs: 8000 }),
+  answerTicket: (id, input) =>
+    request<{ message: string; ticket: ShadowTicket }>('POST', `/tickets/${enc(id)}/answer`, input, { timeoutMs: 8000 }),
+  stopTicket: (id) => request<{ ticket: ShadowTicket }>('POST', `/tickets/${enc(id)}/stop`, {}, { timeoutMs: 8000 }),
+  retryTicket: (id) => request<{ message: string; ticket: ShadowTicket }>('POST', `/tickets/${enc(id)}/retry`, {}, { timeoutMs: 8000 }),
+  stepTickets: () => request<Record<string, unknown>>('POST', '/tickets/step', {}, { timeoutMs: 20000 }),
 };

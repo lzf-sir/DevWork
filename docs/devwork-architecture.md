@@ -86,7 +86,7 @@ backend/.runtime/
 
 ## 3. 后端路由分层
 
-`backend/src/routes/index.ts` 只有 46 行：装配顺序 + `/api` 兜底。全部 113 条路由分布在 13 个域模块：
+`backend/src/routes/index.ts` 只有 48 行：装配顺序 + `/api` 兜底。全部 134 条路由分布在 15 个域模块：
 
 | 模块 | 行数 | 路由 | 负责 |
 |---|---:|---:|---|
@@ -103,6 +103,8 @@ backend/.runtime/
 | `files.ts` | 136 | 8 | 文件树 / 内容 / 大纲 / git / 写回 |
 | `settings.ts` | 404 | 18 | 设置 / LLM 配置 / 权限策略 / 维护 |
 | `audit.ts` | 130 | 4 | 审计查询与导出 |
+| `shadow.ts` | 214 | 13 | 影子链路（事件 / 定时源 / 草案 / 策略 / 统计 / 开关 / 导出） |
+| `tickets.ts` | 108 | 8 | 工单（列表 / 详情 / 回答 / 停止 / 重派 / 推进循环） |
 | `helpers.ts` | 230 | — | 请求解析、工作区守卫、审计筛选与导出格式 |
 
 ### 装配顺序不是随便排的
@@ -174,7 +176,11 @@ npm run check:env    # 环境门禁：Node 22 / node:sqlite / WAL / 目录可写
 npm run typecheck    # 前端 + 后端 tsc，双份
 npm run build        # typecheck + vite build → dist/
 npm run pack         # 打包 portable exe（build/pkg 暂存 + release/ 输出）
-npm run test:smoke   # 冒烟三件套：smoke 118 + repo-clone 21 + db-browse 35
+npm run test:smoke   # 六阶段：smoke 118 + repo 21 + db 35 + asset 51 + shadow 87 + tickets 35
+npm run test:shadow        # 只跑影子链路（起隔离实例，端口 3011）
+npm run test:shadow:core   # 影子核心逻辑（进程内，拨时钟验到点/补发）
+npm run test:shadow:visual # 影子决策页视觉验收（需先 build，产出截图）
+npm run test:tickets      # 只跑工单链路（授权 → 建单 → 派工 → 报告）
 ```
 
 `npm run launch` 会先跑 `check:env` 再决定启动方式。
@@ -194,6 +200,10 @@ npm run test:smoke   # 冒烟三件套：smoke 118 + repo-clone 21 + db-browse 3
 | 7 | 就地拼运行时路径 | 从 `config.ts` 的 `RUNTIME_DIR` / `DATA_DIR` 等常量取 |
 | 8 | 批量改路由用「下一个 `body(req)`」定位 | 必须按**路由块**（扫描到配平 `}));`），否则单行内联或同路径多方法会串块 |
 | 9 | 以为目录改名会破坏打包 | 打包契约是 `resources/{dist,server,runtime}`，与源码目录名无关；要改的是 main.cjs + package.mjs + builder.yml |
+| 10 | 把清单工具的 action 命名成 `todo.write` | `isWriteAction()` 会判成写操作，清单每更新一次就弹一张审批卡。用 `todo.plan` |
+| 11 | 深色主题只覆盖了 `--gray-*` | `--surface-1` 原先是字面量 `#FFFFFF`，深色下不翻转 → 拿它做底的卡片白底配浅字，几乎读不出来。新增卡片优先用 `--gray-25/--gray-50`（跟计划卡一致），别用 `--surface-1` |
+| 12 | 前端按 id 追加卡片 | 清单卡每步回传同一个 id，`mergeThread()` 必须按 id 原位替换，否则一个 20 步任务刷出 20 张清单 |
+| 13 | 上下文预算写死数字 | 一律走 `resolveContextWindow()` / `measureContext()`；前端显示按 `/1000` 折算（128000 → 128k），别用 `/1024` |
 
 ---
 
@@ -220,3 +230,74 @@ npm run test:smoke   # 冒烟三件套：smoke 118 + repo-clone 21 + db-browse 3
 | `f5721f8` | 剩余写端点全接入（42 个）；修正 SQL / 导出格式的语义边界 |
 
 **指标**：路由 1815 → 46 行入口 ｜ 写端点校验覆盖 42/42 ｜ 冒烟 174 项全绿 ｜ 前端包 425.60KB（零 zod）
+
+---
+
+## 9. 变更记录（2026-11-13 P1 影子链路）
+
+| 新增 | 作用 | 边界 |
+|---|---|---|
+| `backend/src/db/schema.sql`（+4 表） | `source` / `thread` / `trigger` / `decision` | 只记录，不动既有表语义 |
+| `backend/src/services/shadow-gate.ts` | 七档确定性准入（纯函数，无 IO） | 不查库、不调模型 |
+| `backend/src/services/shadow-scheduler.ts` | 800ms tick：收事件 → 研判 → 记账 | **不建工单、不派工、不执行** |
+| `backend/src/routes/shadow.ts` | 8 条只读 / 开关端点 | 无执行副作用 |
+| `shared/contracts/shadow.ts` | 写入侧 zod 契约 | 前端不引（避免 zod 进包） |
+| `services/conversation.ts`（+6 行） | `ingestUserTurn()` 取料，fire-and-forget | 内部吞异常，观测不得成为故障源 |
+| `pruneShadowLedger()`（6h） | 账本留存 30 天 | 只删可重建观测数据，审计与工单不动 |
+| `frontend/src/views/shadow/ShadowView.tsx` | 智能体工作台的壳：三分区切换 + 总开关 + 待办徽标 | 分区是「问题」的切分，不是页面的切分 |
+| `frontend/src/views/shadow/useShadowData.ts` | 一次加载、三个分区共用；所有写操作集中在此 | 同屏数字必须来自同一时刻的快照 |
+| `frontend/src/views/shadow/TicketsPanel.tsx` | 工单分区：KPI / 筛选 / 搜索 / 待人输入 | 待人排最前，不按时间倒序 |
+| `frontend/src/views/shadow/TicketDetail.tsx` | 工单详情：范围 / 轮次 / 提问 / 收件箱 / 工作目录 | 就地展开，不遮挡列表 |
+| `frontend/src/views/shadow/GatePanel.tsx` | 准入分区：模式 / auto 刹车 / 白名单 / 源 / 规则范围 | 每个开关带「改它会怎样」 |
+| `frontend/src/views/shadow/LedgerPanel.tsx` | 账本分区：授权草案 / 决策表 / 原因分布 | 只记录，不执行 |
+| `frontend/src/views/ShadowView.tsx` | 兼容入口，re-export `./shadow/ShadowView` | 拆分不动 App 的路由与侧栏 |
+| `backend/src/services/tickets.ts` | 工单状态机 + Router + 派工 + 注意力 | stage 由事实推导，不手工赋值 |
+| `backend/src/services/worker-runtime.ts` | 单轮执行：Mandate 裁剪工具面 + 双闸 | 没有 accepted 授权不开跑 |
+| `backend/src/services/agent-loop.ts` | 研判 → 派单 → 执行 → 回收 的 1s 循环 | 关停后只空转 |
+| `backend/src/services/shadow-collectors.ts` | log / git / terminal / sql 四类采集器 | 位点存库，一轮最多一条；sql 读 `sql_trace` |
+| `backend/src/services/subscription.ts` | 订阅扇出：把同线程后续事件投进工单收件箱 | 只投 `would_accept=1`，不送权限 |
+| `backend/src/services/workdir.ts` | 每工单一个目录 + 代码资产 git worktree | 写目标从派生面推导；建不出隔离就 blocked，不降级 |
+| `backend/src/services/exec-context.ts` | AsyncLocalStorage 覆盖仓库根 + 声明本单必须隔离的写目标 | 只覆盖本单声明过的资产；隔离缺根时拒绝回落共享仓库 |
+| `tests/shadow-visual.mjs` | 8 项视觉验收（CDP 截图 + 断言） | `npm run test:shadow:visual`，需先 `npm run build` |
+| `tests/shadow.mjs` | 87 项：判定 / 频控 / 定时源 / 授权名单 / 真人取料 / 草案与粒度 / auto | 独立文件，可单跑 |
+| `tests/shadow-visual.mjs` | 34 项：三分区切换 / 详情展开 / 徽标 / auto 水位 | 需先 `npm run build` |
+| `tests/shadow-core.ts` | 75 项：定时源 + 工单生命周期 + 四类采集器 + 工作区隔离 + 扇出 + auto 签发 | 进程内跑，`npm run test:shadow:core` |
+| `tests/tickets.mjs` | 35 项：授权 → 建单 → 派工 → 报告 → 详情聚合 → 停止 | `npm run test:tickets` |
+
+关键约定：**tick 的全部状态在表里**（`trigger.disposition` 游标 / `thread.eval_running`
+线程锁 / `decision` 账本），进程重启后 `recoverShadowState()` 抹平残留锁即可续跑。
+`DEVWORK_SUPERAGENT=off` 一键关停。
+
+`tests/run-smoke.mjs` 支持阶段过滤：`node tests/run-smoke.mjs shadow`
+（用位置参数而非环境变量，Windows 下不必依赖 cross-env）。
+
+---
+
+## 10. 变更记录（2026-11-14 任务清单与上下文压缩）
+
+长任务看不出发进度、Context 满了就直接报错——这两件事是同一个问题的两面：
+**Agent 干到一半没了状态**。所以一次性做掉：清单卡记「做到哪一步」，
+上下文压缩记「聊到哪一段」，两者都不删原始消息。
+
+| 新增 | 作用 | 边界 |
+|---|---|---|
+| `backend/src/services/todo.ts` | 任务清单：一张卡原位更新（`revision` 自增），进度由状态推导 | 最多 30 项；`writeTodoPlan()` 先按 id 对齐、再按标题对齐、最后才新增 |
+| `backend/src/config/tools.ts`（+1） | `todo_write` 工具，`action:'todo.plan'` | 不能叫 `todo.write`，否则每一步弹审批（陷阱 10） |
+| `backend/src/config/tool-catalog.ts`（+1） | 工具目录条目（`assetType:'workspace'`） | 描述里写死「先拆 3~7 步、每步回传完整清单、不许假装完成」 |
+| `backend/src/services/context-budget.ts` | 口径唯一：`estimateTokens` / `resolveContextWindow` / `measureContext` / `buildBudgetedHistory` / `compactConversation` | 测量与装载共用同一套累加逻辑，避免「显示 60% 实际塞 95%」 |
+| `backend/src/routes/conversations.ts`（+2） | `GET /:id/context-usage`、`POST /:id/compact` | 压缩走 `mode:'manual'`，落 `context.compact` 审计 |
+| `shared/contracts/conversation.ts`（+1） | `compactContextSchema`（`model?` / `keepShare` 0.1~0.5） | 形状归契约，越界由 zod 挡成 400 |
+| `frontend/src/hooks/useContextUsage.ts` | 取数 + 手动压缩，失败保留上一份不清空 | 不轮询；只在发消息后 / 手动刷新时打 |
+| `frontend/src/components/Composer.tsx`（+） | 输入框右侧的 16px 圆环 + 消耗浮层 | ok/near/over 三档变色，浮层点外部收起 |
+| `frontend/src/store.tsx`（+`mergeThread`） | 同 id 原位替换、其余追加 | 清单卡与摘要卡都靠它，否则长任务刷屏（陷阱 12） |
+| `frontend/src/components/ChatThread.tsx`（+2） | `todo` 卡（✓/▸/!/序号 + 进度条）与 `summary` 卡（折叠早前 N 条） | 摘要卡默认收起，但必须写明「原始消息仍完整保留」 |
+| `tests/context.mjs` | 34 项：清单原位更新 / revision 推进 / 压缩少于原来 / 原始消息未删 / 404 与越界 400 | 第七阶段，`node tests/run-smoke.mjs context` |
+
+两条纪律（写进 `systemPrompt()`，模型可见）：
+1. 多步任务先 `todo_write` 拆成 3~7 步，每完成一步回传**完整清单**（不是增量）；
+2. 卡住就标 `blocked` 并说明缺什么，不许把没做的事写成完成。
+
+压缩的三条硬约束：
+- **不删原始消息**。压缩只改「发给模型的内容」，时间线里的消息一条不少；
+- **提炼后没变小就不插卡**（`skipped` + 原因），负收益的压缩比不压缩更糟；
+- **来源必须可追溯**：接得上模型时 `source:'model'`，否则 `source:'rule'` 并如实标注「规则提炼」。

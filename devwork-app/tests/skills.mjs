@@ -36,7 +36,7 @@ function bundle(entry, outfile) {
 }
 
 const server = await bundle('backend/src/config/skills.ts', path.join(OUT_DIR, 'server-skills.mjs'));
-const client = await bundle('src/data/mock.ts', path.join(OUT_DIR, 'client-mock.mjs'));
+const client = await bundle('frontend/src/data/mock.ts', path.join(OUT_DIR, 'client-mock.mjs'));
 
 let failed = 0;
 const check = (name, ok, detail) => {

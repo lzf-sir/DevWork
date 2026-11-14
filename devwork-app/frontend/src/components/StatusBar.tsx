@@ -18,7 +18,7 @@ export default function StatusBar(): React.ReactElement {
         <span className="sic">
           <ChartIcon size={12} strokeWidth={1.4} />
         </span>
-        上下文 {state.ctxTokens}k/200k
+        上下文 {state.ctxTokens}k/{state.ctxBudget}k
       </span>
       <span>本会话 ¥{state.cost.toFixed(2)}</span>
       {state.statusNote ? <span>{state.statusNote}</span> : null}

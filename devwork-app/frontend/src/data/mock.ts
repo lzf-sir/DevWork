@@ -13,6 +13,7 @@ export type ViewName =
   | 'detail-code'
   | 'detail-kb'
   | 'projects'
+  | 'shadow'
   | 'settings';
 
 export type AssetGo = 'code' | 'db' | 'server' | 'kb';
@@ -125,6 +126,27 @@ export type Message = (
   | { id: string; kind: 'suggestion'; cmd: string; reason?: string; suggestion?: string }
   /** 计划卡：展开可看每一步目标与耗时（此前被压成一行文字，信息全丢）。 */
   | { id: string; kind: 'plan'; intent: string; steps: { goal: string; durationMs: number }[]; degraded?: boolean }
+  /** 任务清单卡：长任务每一步的状态。**同一张卡原位更新**（id 不变），
+   *  所以长任务推进时用户看到的是同一份清单在变，而不是一串历史清单。 */
+  | {
+      id: string;
+      kind: 'todo';
+      items: { id: string; title: string; status: 'pending' | 'doing' | 'done' | 'blocked'; note?: string }[];
+      progress: { done: number; total: number; doing: number; blocked: number; percent: number };
+      degraded?: boolean;
+    }
+  /** 上下文压缩摘要卡：折叠了早前 N 条对话。原始消息仍在时间线里，只是不再整段进提示。 */
+  | {
+      id: string;
+      kind: 'summary';
+      content: string;
+      source: 'model' | 'rule';
+      mode: 'auto' | 'manual';
+      messages: number;
+      freedTokens: number;
+      at: string;
+      model?: string;
+    }
   /** 降级说明：未接入模型 / 模型调用失败时必须常驻可见，不能只弹一次 toast。 */
   | { id: string; kind: 'notice'; level: 'info' | 'warn'; title: string; content: string }
   | { id: string; kind: 'conclusion'; confidence: string; paras: InlineSeg[][]; note?: string }

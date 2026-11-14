@@ -211,21 +211,21 @@ console.log('\n--- C1. 命令模板库 ---');
 /* ================= C2. 文件写 + 回滚 ================= */
 console.log('\n--- C2. 文件写三层防线 ---');
 {
-  const first = mod.executeFileWrite('a-order-service', 'v9-test/agent-write.md', '第一版内容', identity, 'w-ops');
+  const first = await mod.executeFileWrite('a-order-service', 'v9-test/agent-write.md', '第一版内容', identity, 'w-ops');
   check('C2-1 新文件写入成功（precheck 通过 → 落盘 → 校验）',
     first.ok && first.diskChanged, first.message);
 
-  const second = mod.executeFileWrite('a-order-service', 'v9-test/agent-write.md', '第二版内容', identity, 'w-ops');
+  const second = await mod.executeFileWrite('a-order-service', 'v9-test/agent-write.md', '第二版内容', identity, 'w-ops');
   check('C2-2 覆盖写入成功且带回滚引用', second.ok && typeof second.rollbackRef === 'string', second.message);
 
   const restored = await mod.rollbackWritePlan(second.rollbackRef, identity, 'w-ops');
   check('C2-3 回滚恢复到第一版', restored.ok, restored.message);
 
-  const sensitive = mod.executeFileWrite('a-order-service', '.env', 'SECRET=1', identity, 'w-ops');
+  const sensitive = await mod.executeFileWrite('a-order-service', '.env', 'SECRET=1', identity, 'w-ops');
   check('C2-4 敏感文件写入被 precheck 拦截（审批不豁免现实检查）',
     !sensitive.ok && sensitive.message.includes('precheck') && !sensitive.diskChanged, sensitive.message.slice(0, 120));
 
-  const escape = mod.executeFileWrite('a-order-service', '../../outside.md', 'x', identity, 'w-ops');
+  const escape = await mod.executeFileWrite('a-order-service', '../../outside.md', 'x', identity, 'w-ops');
   check('C2-5 路径越界被拦截', !escape.ok && !escape.diskChanged, escape.message.slice(0, 120));
 }
 

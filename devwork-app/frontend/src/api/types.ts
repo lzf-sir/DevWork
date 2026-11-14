@@ -264,6 +264,8 @@ export interface MessageCard {
   kind:
     | 'bubble'
     | 'plan'
+    | 'todo'
+    | 'summary'
     | 'text'
     | 'tool_row'
     | 'approval_card'
@@ -314,6 +316,10 @@ export interface MessageTurn {
 import type { SendMessageInput as SendMessageInputContract } from '../../../shared/contracts';
 export type SendMessageInput = SendMessageInputContract;
 
+/** 手动压缩的入参（全字段可选：不传就按当前模型窗口的默认水位）。 */
+import type { CompactContextInput as CompactContextInputContract } from '../../../shared/contracts';
+export type CompactContextInput = CompactContextInputContract;
+
 /** 消息时间线截断（撤回 / 编辑重发 / 重试共用）。 */
 export interface TruncateMessagesInput {
   messageId: string;
@@ -341,6 +347,52 @@ export interface TurnUsage {
   totalTokens?: number;
   costCny?: number;
   model?: string;
+}
+
+/* ---------------- 任务清单 / 上下文压缩 ---------------- */
+
+/** 清单项状态：只有四种。没有「进展顺利」这种无法判断真假的中间态。 */
+export type TodoStatus = 'pending' | 'doing' | 'done' | 'blocked';
+
+export interface TodoProgressView {
+  done: number;
+  total: number;
+  doing: number;
+  blocked: number;
+  percent: number;
+}
+
+/** 上下文用量明细：输入框小按钮的浮层读它。 */
+export interface ContextUsage {
+  /** 本轮真实会发给模型的 token 估算（系统 + 工具 + 清单 + 摘要 + 历史 + 本轮输入）。 */
+  used: number;
+  budget: number;
+  ratio: number;
+  /** 自动压缩水位（0~1，默认 0.8）。 */
+  autoCompactAt: number;
+  state: 'ok' | 'near' | 'over';
+  /** 预算来源：设置页覆盖 / 按模型名推断 / 默认值。 */
+  windowSource: 'setting' | 'model' | 'default';
+  model: string;
+  breakdown: { name: string; tokens: number }[];
+  messages: { total: number; inWindow: number; folded: number };
+  summary: { messages: number; tokens: number; source: string; mode: string; at: string; model: string } | null;
+  shouldCompact: boolean;
+}
+
+/** 一次压缩的结果。skipped 时 reason 说明为什么不该压（不是失败）。 */
+export interface CompactionResult {
+  skipped: boolean;
+  reason?: string;
+  before: number;
+  after: number;
+  freed: number;
+  /** 被折叠的消息条数（原始消息仍在时间线里）。 */
+  covered: number;
+  cardId?: string;
+  summary?: { content: string; source: 'model' | 'rule'; model: string; messages: number; tokens: number };
+  /** 摘要卡的 API 形状，前端插进时间线用。 */
+  card?: MessageCard;
 }
 
 export interface SuggestionInput {
@@ -921,6 +973,303 @@ export interface AuditEvent {
 
 /* ---------------- ApiClient ---------------- */
 
+/* ---------------- 影子链路（P1） ---------------- */
+
+export type ShadowAcceptMode = 'off' | 'observe' | 'auto';
+export type ShadowStrength = 'explicit' | 'inferred';
+
+export interface ShadowRuleScope {
+  actions: string[];
+  riskCeiling?: 'low' | 'medium' | 'high';
+  maxWrites?: number;
+}
+
+export interface ShadowRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  keywords: string[];
+  assetTypes?: string[];
+  /** 命中这条规则给出的授权范围。缺了它草案发不出来。 */
+  scope?: ShadowRuleScope;
+}
+
+export interface ShadowPolicy {
+  acceptMode: ShadowAcceptMode;
+  allowedActors: string[];
+  allowedBots: string[];
+  threadRatePerHour: number;
+  /** auto 每小时最多自动签发几份。0 = 关掉自动签发。 */
+  autoMaxPerHour: number;
+  /** 是否允许 auto 签发「有写权限」的范围。默认 false。 */
+  autoAllowWrites: boolean;
+  rules: ShadowRule[];
+  policyVersion: string;
+}
+
+export interface ShadowSource {
+  kind: string;
+  enabled: boolean;
+  triggers: number;
+  lastSeenAt: string;
+  /** 定时源的下次触发时刻（ISO）；其余源为空串。 */
+  nextFireAt: string;
+  /** 只有定时源有：调度方式与巡检提示语。 */
+  schedule?: ShadowScheduleConfig;
+}
+
+export interface ShadowScheduleConfig {
+  schedule?: 'daily' | 'interval';
+  at?: string;
+  everyMinutes?: number;
+  prompt?: string;
+}
+
+export interface ShadowStatus {
+  enabled: boolean;
+  running: boolean;
+  phase: string;
+  retentionDays: number;
+  tick: { count: number; lastTickAt: string; lastTickMs: number; intervalMs: number; batch: number };
+  policy: ShadowPolicy;
+  sources: ShadowSource[];
+}
+
+/** 一条决策。P1 的 kind 恒为 ignore —— 会不会接单看 wouldAccept。 */
+export interface ShadowDecision {
+  id: string;
+  threadId: string;
+  triggerId: string;
+  kind: string;
+  strength: ShadowStrength;
+  /** true = 「本来会接这单」，影子期的核心产出。 */
+  wouldAccept: boolean;
+  reasonCode: string;
+  reason: string;
+  matchedRules: string[];
+  policyVersion: string;
+  evalMs: number;
+  createdAt: string;
+}
+
+export interface ShadowTrigger {
+  id: string;
+  threadId: string;
+  threadKey: string;
+  sourceKind: string;
+  actor: string;
+  actorKind: string;
+  addressed: boolean;
+  body: string;
+  disposition: string;
+  decisionId: string;
+  idemKey: string;
+  receivedAt: string;
+}
+
+/** 授权草案的范围。assets 为空 = 范围未定（规则没写清 / 事件不挂资产）。 */
+export interface ShadowMandateScope {
+  /** asset = 收窄到一个具体资产；workspace = 工作区级（必须带 assetTypes 白名单）。 */
+  level: 'workspace' | 'asset';
+  workspaceId: string;
+  assets: string[];
+  assetTypes: string[];
+  actions: string[];
+  riskCeiling: 'low' | 'medium' | 'high';
+  maxWrites: number;
+}
+
+export interface ShadowMandate {
+  id: string;
+  decisionId: string;
+  /** P2 才挂工单；影子期恒为 null。 */
+  ticketId: string | null;
+  status: 'draft' | 'accepted' | 'narrowed' | 'rejected';
+  strength: string;
+  policyVersion: string;
+  requester: string;
+  scope: ShadowMandateScope;
+  matchedRules: string[];
+  attentionBudget: number;
+  note: string;
+  createdAt: string;
+  reviewedAt: string | null;
+  scopeUndefined: boolean;
+  readOnly: boolean;
+}
+
+export type TicketStage =
+  | 'grant' | 'queued' | 'working' | 'idle'
+  | 'person/answer' | 'person/review' | 'person/blocked' | 'person/failed';
+
+export interface TicketQuestion {
+  id: string;
+  question: string;
+  options: unknown[];
+  impact: string;
+  askedAt: string;
+}
+
+/** 工单：P2 的执行单元。stage 由后端从事实推导，前端只显示。 */
+export interface ShadowTicket {
+  id: string;
+  shortName: string;
+  workspaceId: string;
+  threadId: string;
+  title: string;
+  state: 'open' | 'ended';
+  stage: TicketStage;
+  endedReason: string;
+  conversationId: string | null;
+  mandateId: string | null;
+  mandateStatus: string;
+  matchedRules: string[];
+  report: string;
+  reportNote: string;
+  tokensIn: number;
+  tokensOut: number;
+  createdAt: string;
+  endedAt: string | null;
+  /** 待人时的结构化提问：面板直接给输入框，不让人翻执行日志。 */
+  question: TicketQuestion | null;
+}
+
+/** 一次派工。轮次多了之后，这张表是判断「它到底卡在哪一轮」的唯一依据。 */
+export interface TicketAssignment {
+  id: string;
+  state: 'pending' | 'running' | 'ended' | string;
+  report: string;
+  reportNote: string;
+  tokensIn: number;
+  tokensOut: number;
+  attempts: number;
+  workdir: string;
+  workerSession: string;
+  startedAt: string;
+  endedAt: string | null;
+}
+
+export interface TicketAttentionItem {
+  id: string;
+  question: string;
+  options: unknown[];
+  impact: string;
+  blocking: boolean;
+  askedAt: string;
+  answeredAt: string | null;
+  answer: string | null;
+}
+
+export interface TicketInboxItem {
+  triggerId: string;
+  actor: string;
+  body: string;
+  receivedAt: string;
+}
+
+/** 详情：一张单的全部事实。后端一次合成，前端不再串四个接口对时间线。 */
+export interface TicketDetail extends ShadowTicket {
+  mandate: {
+    id: string;
+    status: string;
+    strength: string;
+    policyVersion: string;
+    requester: string;
+    note: string;
+    reviewedAt: string | null;
+    scope: {
+      level?: 'workspace' | 'asset';
+      assets?: string[];
+      assetTypes?: string[];
+      actions?: string[];
+      riskCeiling?: string;
+      maxWrites?: number;
+    };
+    matchedRules: string[];
+  } | null;
+  assignments: TicketAssignment[];
+  attentions: TicketAttentionItem[];
+  inbox: TicketInboxItem[];
+  totals: {
+    rounds: number;
+    failedRounds: number;
+    tokensIn: number;
+    tokensOut: number;
+    wallMs: number;
+    inboxCount: number;
+  };
+}
+
+/**
+ * 「待人」条目：谁在等我、等我做什么、等了多久。
+ *
+ * 只含 person/* 四种阶段（等你回答 / 待你验收 / 受阻待决 / 失败待处理），
+ * 与 TicketStats.waitingHuman 同一口径 —— 侧栏数字点开必须正好是这个长度。
+ */
+export interface WaitingTicket {
+  id: string;
+  shortName: string;
+  title: string;
+  stage: string;
+  /** 人话版阶段名，服务端给（同一个词不该有第二种译法）。 */
+  waitingFor: string;
+  conversationId: string | null;
+  conversationTitle: string;
+  workspaceId: string;
+  /** 开始等的那一刻：有未答提问取提问时间，否则取工单创建时间。 */
+  since: string;
+  question: {
+    id: string;
+    question: string;
+    options: unknown[];
+    impact: string;
+  } | null;
+}
+
+export interface WaitingSnapshot {
+  items: WaitingTicket[];
+  total: number;
+  byStage: Record<string, number>;
+}
+
+export interface TicketStats {
+  total: number;
+  open: number;
+  waitingHuman: number;
+  endedByHuman: number;
+  assignments: number;
+  failedAssignments: number;
+  attention: { asked: number; answered: number };
+  /** 打扰密度：每张工单平均问了几次人。设计目标 ≤1.5。 */
+  attentionPerTicket: number;
+  stages: Record<string, number>;
+  maxConcurrent: number;
+  loop?: { running: boolean; intervalMs: number; steps: number; lastStepAt: string };
+}
+
+export interface ShadowStats {
+  triggers: { total: number; pending: number; decided: number };
+  /** auto 的实时水位：预算是否用满，决定「没接单」是判断还是刹车。 */
+  auto?: {
+    issuedLastHour: number;
+    maxPerHour: number;
+    budgetLeft: number;
+    allowWrites: boolean;
+    mode: string;
+  };
+  mandates?: {
+    total: number; draft: number; accepted: number; narrowed: number; rejected: number;
+    scopeUndefined: number;
+    /** 粒度分布。 */
+    levelAsset: number;
+    levelWorkspace: number;
+  };
+  decisions: { total: number; wouldAccept: number; wouldAcceptRate: number };
+  last24h: { decided: number; wouldAccept: number; estimatedDailyAccept: number };
+  byReason: { reasonCode: string; count: number; wouldAccept: number }[];
+  bySource: { kind: string; triggers: number }[];
+}
+
 export interface ApiClient {
   health(): Promise<ApiEnvelope<Health>>;
   bootstrap(workspaceId?: string): Promise<ApiEnvelope<Bootstrap>>;
@@ -995,6 +1344,10 @@ export interface ApiClient {
   getExecutionPanel(conversationId: string): Promise<ApiEnvelope<ExecutionPanel>>;
   getArtifactPanel(conversationId: string): Promise<ApiEnvelope<ArtifactPanel>>;
   getUsage(conversationId: string): Promise<ApiEnvelope<Usage>>;
+  /** 上下文用量明细（输入框小按钮）：占用 / 预算 / 构成 / 上次压缩。 */
+  getContextUsage(conversationId: string, model?: string): Promise<ApiEnvelope<ContextUsage>>;
+  /** 手动压缩：把早前对话折叠成摘要卡，原始消息不动。 */
+  compactContext(conversationId: string, input?: CompactContextInput): Promise<ApiEnvelope<CompactionResult>>;
   downloadArtifact(artifactId: string): Promise<ApiEnvelope<{ url: string; fileName: string; sizeBytes: number }>>;
   /** 产物预览（右栏「文件」Tab）：文本给内容、图片给 URL、二进制只给元信息。 */
   getArtifactPreview(artifactId: string): Promise<ApiEnvelope<ArtifactPreview>>;
@@ -1070,4 +1423,32 @@ export interface ApiClient {
   listAudit(query: AuditQuery): Promise<ApiEnvelope<{ items: AuditEvent[]; total: number; page: number; pageSize: number }>>;
   getAuditEvent(id: string): Promise<ApiEnvelope<AuditEvent>>;
   exportAuditCsv(query: AuditQuery): Promise<ApiEnvelope<{ content: string; fileName: string; auditId: string; exported: number; total: number }>>;
+
+  /* ---- 影子链路（P1：只记录，不执行） ---- */
+  getShadowStatus(): Promise<ApiEnvelope<ShadowStatus>>;
+  getShadowStats(): Promise<ApiEnvelope<ShadowStats>>;
+  listShadowDecisions(query?: { limit?: number; wouldAccept?: boolean; reason?: string }): Promise<ApiEnvelope<{ items: ShadowDecision[]; total: number }>>;
+  listShadowTriggers(query?: { limit?: number; disposition?: string; threadKey?: string }): Promise<ApiEnvelope<{ items: ShadowTrigger[]; total: number }>>;
+  runShadowTick(): Promise<ApiEnvelope<{ picked: number; evaluated: number; skipped: number }>>;
+  updateShadowPolicy(patch: Partial<Omit<ShadowPolicy, 'policyVersion'>>): Promise<ApiEnvelope<ShadowPolicy>>;
+  setShadowSource(kind: string, enabled: boolean, schedule?: ShadowScheduleConfig): Promise<ApiEnvelope<{ kind: string; enabled: boolean }>>;
+  /** 立即触发一次（等价于「假装现在到点了」）；不推进下次到点时间。 */
+  fireShadowSource(kind: string): Promise<ApiEnvelope<{ triggerId: string; threadId: string; created: boolean }>>;
+  listShadowMandates(query?: { limit?: number; status?: string }): Promise<ApiEnvelope<{ items: ShadowMandate[]; total: number }>>;
+  /** 人对草案表态。narrowed 时 services 端只会取交集，传新动作无效。 */
+  listTickets(query?: { limit?: number; stage?: string; state?: string }): Promise<ApiEnvelope<{ items: ShadowTicket[]; total: number }>>;
+  getTicketStats(): Promise<ApiEnvelope<TicketStats>>;
+  /** 待人清单：侧栏徽标与会话 tab 橙点共用同一份事实。 */
+  getWaitingTickets(limit?: number): Promise<ApiEnvelope<WaitingSnapshot>>;
+  /** 按会话反查工单（协作流视图）：服务端一次合成详情，前端不再串 /tickets/:id。 */
+  listConversationTickets(id: string, limit?: number): Promise<ApiEnvelope<{ items: TicketDetail[]; total: number }>>;
+  getTicket(id: string): Promise<ApiEnvelope<TicketDetail>>;
+  answerTicket(id: string, input: { attentionId: string; answer: string }): Promise<ApiEnvelope<{ message: string; ticket: ShadowTicket }>>;
+  stopTicket(id: string): Promise<ApiEnvelope<{ ticket: ShadowTicket }>>;
+  retryTicket(id: string): Promise<ApiEnvelope<{ message: string; ticket: ShadowTicket }>>;
+  /** 手动推一轮 Agent 循环（研判 → 派单 → 执行 → 回收）。 */
+  stepTickets(): Promise<ApiEnvelope<Record<string, unknown>>>;
+  setShadowEnabled(enabled: boolean): Promise<ApiEnvelope<{ enabled: boolean }>>;
+  exportShadowCsv(limit?: number): Promise<ApiEnvelope<{ content: string; fileName: string; rows: number }>>;
+  reviewShadowMandate(id: string, input: { status: 'accepted' | 'narrowed' | 'rejected'; note?: string; actions?: string[] }): Promise<ApiEnvelope<ShadowMandate>>;
 }

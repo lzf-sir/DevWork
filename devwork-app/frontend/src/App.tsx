@@ -22,6 +22,7 @@ import DatabaseDetail from './views/DatabaseDetail';
 import CodeDetail from './views/CodeDetail';
 import KbDetail from './views/KbDetail';
 import ProjectsView from './views/ProjectsView';
+import ShadowView from './views/ShadowView';
 import SettingsView from './views/SettingsView';
 import AssetChatDock from './components/AssetChatDock';
 
@@ -57,9 +58,12 @@ function useGlobalShortcuts(): void {
           api.setConfigOpen(false);
         } else if (s.citation) {
           api.setCitation(null);
-        } else if (s.hudPane) {
-          /* 悬浮气泡：Esc 收起（它挂在会话右缘，是"问完即走"的东西）。 */
-          api.setHudPane(null);
+        } else if (s.artifactPickerOpen) {
+          /* 产物选择浮层：Esc 收起（它挂在会话右缘，选完就该走）。 */
+          api.setArtifactPicker(false);
+        } else if (s.collabFor) {
+          /* 协作流是一层「视图」，Esc 先退回对话，不要越过它直接掐生成。 */
+          api.toggleCollab(false);
         } else if (s.view === 'projects' || s.view === 'settings') {
           api.navigate('chat');
         } else {
@@ -72,6 +76,11 @@ function useGlobalShortcuts(): void {
 
       if (mod) {
         switch (true) {
+          /* ⌘1..⌘9：按位置切会话 tab —— 与浏览器一致，比「先找再点」快一档。 */
+          case /^[1-9]$/.test(event.key):
+            event.preventDefault();
+            api.activateSessionTabAt(Number(event.key) - 1);
+            return;
           case key === 'k':
             event.preventDefault();
             api.setPalette(!s.paletteOpen);
@@ -216,8 +225,13 @@ export default function App(): React.ReactElement {
       })();
       hydrateFromRest({
         projects,
+        /* 服务端解析出的当前工作区是权威值：资产级请求靠它注入 workspaceId，
+         * 丢掉它会让前端与后端对「当前在哪个工作区」的认知分叉。 */
+        workspaceId: typeof payload.workspaceId === 'string' ? payload.workspaceId : undefined,
         activeConversationId: currentConversationId || undefined,
-        activeConversationTitle: convTitle || undefined,
+        /* 有真实会话时**必须**用服务端标题（哪怕侧栏里没找到、结果为空），
+         * 否则开发态的演示标题（GMV 归因）会被当成真会话的名字留在 tab 上。 */
+        activeConversationTitle: currentConversationId ? convTitle : undefined,
         readOnlyMode: typeof payload.readOnlyMode === 'boolean' ? payload.readOnlyMode : undefined,
         statusBar: {
           model: typeof statusBar.model === 'string' ? statusBar.model : undefined,
@@ -265,6 +279,7 @@ export default function App(): React.ReactElement {
             <CodeDetail />
             <KbDetail />
             <ProjectsView />
+            <ShadowView />
             <SettingsView />
           </div>
           {/* 资产会话坞：与页面**并排的一列**（可折叠展开），不是浮层抽屉。 */}

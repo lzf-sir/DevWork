@@ -12,11 +12,13 @@ import { CORS_ORIGINS, DIST_DIR, HOST, PORT, distExists, ensureDirs } from './co
 import { initDatabase, closeDatabase, ensureColumn, normalizeAuditActors, run, dropLegacyAccountTables } from './db/database';
 import { initDemoDatabase } from './db/demo';
 import { seedIfEmpty, migrateLegacySettings, ensureAgentV9Assets } from './db/seed';
-import { migrateCitations } from './db/migrate';
+import { migrateCitations, migrateSourceReadPosition } from './db/migrate';
 import { bootstrapArtifacts, bootstrapRepo } from './sandbox/bootstrap';
 import { ensureFtsTable, runDocIndex, runIndex } from './services/indexer';
 import { initLogSink, appendLog } from './services/log-sink';
 import { registerRoutes } from './routes/index';
+import { startShadowScheduler, stopShadowScheduler, pruneShadowLedger } from './services/shadow-scheduler';
+import { startAgentLoop, stopAgentLoop } from './services/agent-loop';
 import { shellGate } from './http/shell-gate';
 import { detectDriver, driverDiagnosis } from './db/adapter';
 import { settingRaw } from './db/repositories';
@@ -48,9 +50,18 @@ ensureColumn('credential_binding', 'username', "TEXT NOT NULL DEFAULT ''");
 /* 资产绑定会话：从代码库 / 数据 / 终端页唤起的会话默认挂在该资产上。 */
 ensureColumn('conversation', 'asset_id', 'TEXT');
 ensureColumn('conversation', 'asset_type', 'TEXT');
+
+/* 扇出位点：这条事件被投给了哪张工单。
+ * 用它而不是新表，是因为「投递」天然是事件的一个属性（谁收的、收没收），
+ * 建成独立表后每次查「投了没」都要 JOIN 一次，而这一步在 tick 里每轮都跑。 */
+ensureColumn('trigger', 'delivered_ticket_id', 'TEXT');
+/* 扇出处理位点：空 = 这条事件还没被分发过。
+ * 必须有它，否则「没有工单可投」的事件会每轮都被扫出来重判一次。 */
+ensureColumn('trigger', 'fanout_at', 'TEXT');
 /* 会话归档：archived_at 非空 = 已归档（侧栏隐藏，设置页可恢复 / 彻底删除）。 */
 ensureColumn('conversation', 'archived_at', 'TEXT');
 /* 内置浏览器：页面快照三列（前端回传当前页标题/正文，Agent 才能"看过"这一页）。 */
+ensureColumn('source', 'next_fire_at', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('browser_state', 'page_title', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('browser_state', 'page_text', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('browser_state', 'page_captured_at', "TEXT NOT NULL DEFAULT ''");
@@ -88,6 +99,12 @@ if (citationFix.fixed > 0 || citationFix.removed > 0) {
   // eslint-disable-next-line no-console
   console.log(`[DevWork] 引用整理：补齐定位 ${citationFix.fixed} 条 / 删除无落点 ${citationFix.removed} 条`);
 }
+/* 采集器位点曾被幂等键覆盖：清掉写坏的值，否则 terminal / sql 采集器永远采不到新行。 */
+const positionFix = migrateSourceReadPosition();
+if (positionFix.fixed > 0) {
+  // eslint-disable-next-line no-console
+  console.log(`[DevWork] 采集器位点整理：清理写坏位点 ${positionFix.fixed} 处`);
+}
 
 /* ---------------- Express 应用 ---------------- */
 const app = express();
@@ -117,8 +134,24 @@ function cleanupExpiredSnapshots(): void {
     /* 清理失败不阻断启动。 */
   }
 }
+/* 影子链路账本留存：每一条用户消息都会落一条 trigger，桌面端跑一年就是几十万行。
+ * 只删可重建的观测数据（decision / 已处置的 trigger / 空 thread），审计与工单一律不动。 */
+function pruneShadowLedgerSafely(): void {
+  try {
+    const result = pruneShadowLedger();
+    const total = result.decisions + result.triggers + result.threads + result.mandates + result.sqlTraces;
+    if (total > 0) {
+      // eslint-disable-next-line no-console
+      console.log(`[DevWork] 影子账本留存清理：决策 ${result.decisions} / 触发 ${result.triggers} / 线程 ${result.threads} / 草案 ${result.mandates} / 慢查询 ${result.sqlTraces}`);
+    }
+  } catch {
+    /* 清理失败不阻断启动。 */
+  }
+}
 cleanupExpiredSnapshots();
+pruneShadowLedgerSafely();
 setInterval(cleanupExpiredSnapshots, 6 * 3600 * 1000).unref();
+setInterval(pruneShadowLedgerSafely, 6 * 3600 * 1000).unref();
 
 /** 服务端请求日志：requestId 可追溯（V7 佐证）。 */
 app.use((req: Request, res: Response, next: NextFunction) => {
@@ -140,6 +173,19 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 app.use(shellGate());
 
 registerRoutes(app);
+
+/* P1 影子链路：只记录「本来会接哪些单」，不建工单、不派工、不执行。
+ * 位置在路由装配之后、listen 之前 —— 早了数据库还没播种完（源要挂 workspace），
+ * 晚了第一批事件要等下一个 tick。DEVWORK_SUPERAGENT=off 可整体关停。 */
+const shadowBoot = startShadowScheduler();
+// eslint-disable-next-line no-console
+console.log(`[DevWork] 影子链路：${shadowBoot.reason}`);
+
+/* P2：研判之后还要派单与执行。单独一个循环，reason 同上。
+ * 注意它只在 has accepted mandate 时才建工单 —— 没有授权就没有工单。 */
+const agentBoot = startAgentLoop();
+// eslint-disable-next-line no-console
+console.log(`[DevWork] Agent 循环：${agentBoot.reason}`);
 
 /* 生产 / 桌面态：Express 托管 dist，与 /api 同源，零 CORS。 */
 if (distExists()) {
@@ -191,6 +237,9 @@ let closing = false;
 function shutdown(signal: string): void {
   if (closing) return;
   closing = true;
+  /* 先停两个循环：tick 里还有写库动作，晚停会撞上 checkpoint。 */
+  stopAgentLoop();
+  stopShadowScheduler();
   // eslint-disable-next-line no-console
   console.log(`[DevWork] ${signal} → WAL checkpoint + close`);
   const force = setTimeout(() => {

@@ -5,7 +5,7 @@
  */
 import { Worker } from 'node:worker_threads';
 import { DEMO_DB_PATH, SQL_TIMEOUT_MS } from '../config';
-import { checksumFile, writeAudit } from '../db/database';
+import { checksumFile, newId, nowIso, run, writeAudit } from '../db/database';
 import { ApiFailure } from '../http/core';
 import { guard, type GuardResult } from './sql-guard';
 import type { Identity } from '../http/core';
@@ -153,6 +153,22 @@ export async function runSqlQuery(
   const rows = reply.rows ?? [];
   const after = checksumFile(DEMO_DB_PATH);
   const durationMs = Date.now() - start;
+
+  /* 慢查询留痕：只记超过阈值的，供 SQL 采集器产事件。
+   *
+   * 为什么不记全部：这张表若记录每一次查询，就会变成第二个审计日志，
+   * 而巡检只关心「慢的那些」。阈值取 500ms 而采集器再筛 1500ms，
+   * 是为了让「慢查询」的判定口径可以事后调整，不用改埋点重发版。 */
+  if (durationMs >= 500) {
+    try {
+      run(
+        'INSERT INTO sql_trace (id,asset_id,statement,duration_ms,row_count,created_at) VALUES (?,?,?,?,?,?)',
+        newId('sqlt'), assetId, guarded.statement.slice(0, 500), durationMs, rows.length, nowIso(),
+      );
+    } catch {
+      /* 埋点失败不能影响查询本身：观测是旁路，不是主链路。 */
+    }
+  }
   const nullColumns = names.filter((name, index) => rows.some((row) => row[index] === null));
   const enumColumns = names.filter((name) => /status|state|channel/i.test(name));
   const auditId = writeAudit({

@@ -23,6 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { withWorkspace } from './lib/workspace.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SELF_HOSTED = !process.env.DEVWORK_BASE;
@@ -54,8 +55,10 @@ function check(group, name, expected, actual, ok, note = '') {
 async function call(method, urlPath, body, timeoutMs = 20000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  /* 资产级请求必须带 workspaceId（后端守卫缺省即拒）；本文件资产都在 w-ops。 */
+  const target = withWorkspace(urlPath, 'w-ops');
   try {
-    const res = await fetch(`${API}${urlPath}`, {
+    const res = await fetch(`${API}${target}`, {
       method,
       headers: body ? { 'Content-Type': 'application/json' } : undefined,
       body: body ? JSON.stringify(body) : undefined,
@@ -294,15 +297,19 @@ async function testSecurityBoundary() {
   check(group, '正常键仍然落库', 'dbPath=demo.sqlite',
     unknownConfig.dbPath, unknownConfig.dbPath === 'demo.sqlite');
 
-  /* 3. 未知资产类型 fail closed：整份 config 丢弃，不做「宽松放行」。 */
-  const weirdId = await createAsset({
+  /* 3. 未知资产类型 fail closed。
+   * 契约层（shared/contracts/asset.ts 的 type 枚举）先拒，所以走不到
+   * 「丢弃 config 后建一条僵尸资产」那条路 —— 这比原断言更严，故改为验 400。 */
+  const weird = await call('POST', '/assets', {
+    workspaceId: 'w-ops',
     type: 'weird-type',
     name: '表单测试-未知类型',
+    env: 'staging',
     config: { engine: 'sqlite', dbPath: 'x.sqlite' },
   });
-  const weirdConfig = readConfig(weirdId) ?? {};
-  check(group, '未知资产类型：config 整体丢弃（fail closed）', '{}',
-    JSON.stringify(weirdConfig), Object.keys(weirdConfig).length === 0);
+  check(group, '未知资产类型：契约层拒收', 400, weird.status, weird.status === 400);
+  check(group, '错误码 E_VALIDATION', 'E_VALIDATION',
+    weird.json?.error?.code, weird.json?.error?.code === 'E_VALIDATION');
 
   /* 4. 值的长度有界：超长字符串被截断，不允许把 10MB 塞进 config。 */
   const longId = await createAsset({
@@ -398,16 +405,26 @@ async function testCredentialBinding() {
   check(group, '令牌凭据记住了鉴权方式', 'token', tokenBinding?.auth_method, tokenBinding?.auth_method === 'token');
   check(group, '令牌凭据没有账号名', '', tokenBinding?.username, String(tokenBinding?.username ?? '') === '');
 
-  /* 6. 凭据不合法时如实报错，而不是假装绑上了。 */
-  const badCreated = await createAssetFull({
+  /* 6. 凭据不合法时如实报错，而不是假装绑上了。
+   * 现状：label 由契约层（asset.ts）拦下 → 整份请求 400，资产不创建。
+   * 这与「建资产 + credentialError」是两种都说得通的语义：
+   *   - 契约拒：脏凭据进不了库，客户端必须改；
+   *   - 软失败：资产先建，凭据单独补。
+   * 当前实现选了前者，故此处按 400 断言；要改成软失败需先放开契约层的 label。 */
+  const badCreated = await call('POST', '/assets', {
+    workspaceId: 'w-ops',
     type: 'db',
     name: '表单测试-凭据缺标签',
+    env: 'staging',
     config: { engine: 'sqlite', dbPath: 'demo.sqlite' },
     credential: { label: '', method: 'password', username: 'ro', secret: 'pw' },
   });
-  check(group, '凭据缺标签时不绑定', false, badCreated.credentialBound, badCreated.credentialBound === false);
-  check(group, '凭据缺标签时给出原因', '非空', String(badCreated.credentialError ?? ''),
-    typeof badCreated.credentialError === 'string' && badCreated.credentialError.length > 0);
+  check(group, '凭据缺标签时拒收整单', 400, badCreated.status, badCreated.status === 400);
+  check(group, '错误里指明是凭据标签', true,
+    String(badCreated.json?.error?.message ?? '').includes('凭据标签'),
+    badCreated.json?.error?.message);
+  check(group, '没有留下半绑定的资产', true,
+    !badCreated.json?.data?.id, `data.id=${badCreated.json?.data?.id}`);
 
   /* 7. 单独走绑定端点也支持记录鉴权方式与账号（详情页「绑定凭据」按钮）。 */
   const manualId = await createAsset({

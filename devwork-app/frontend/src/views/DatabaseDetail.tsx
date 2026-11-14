@@ -3,6 +3,7 @@ import { useStore } from '../store';
 import { api } from '../api/client';
 import { sqlColumnNames, sqlRows } from '../api/adapters';
 import { useLiveData, useLiveRefresh } from '../api/live';
+import { useAssetTarget } from '../hooks/useAssetTarget';
 import {
   Banner,
   DetailHeader,
@@ -89,11 +90,16 @@ export default function DatabaseDetail(): React.ReactElement {
   const active = tableStates[activeTab];
   const activeIsQuery = activeTab === QUERY_TAB;
 
+  /* 当前工作区里的数据库资产：不再写死 a-order-db-prod（那是 w-ops 的演示资产）。 */
+  const dbAsset = useAssetTarget('db');
+  const assetId = dbAsset?.id ?? '';
+
   /* ============ 对象树装载 ============ */
   useEffect(() => {
     if (state.view !== 'detail-db') return;
+    if (!assetId) return;
     let alive = true;
-    void api.getSqlSchema('a-order-db-prod').then((envelope) => {
+    void api.getSqlSchema(assetId).then((envelope) => {
       if (!alive || !envelope.ok) return;
       const data = envelope.data;
       const tableNodes: TreeObject[] = (data.tables ?? []).map((table) => ({
@@ -115,7 +121,7 @@ export default function DatabaseDetail(): React.ReactElement {
     return () => {
       alive = false;
     };
-  }, [state.view, refresh]);
+  }, [state.view, refresh, assetId]);
 
   /* ============ 打开表：新标签页 + 首屏加载 ============ */
   const openTable = (table: string): void => {
@@ -164,7 +170,7 @@ export default function DatabaseDetail(): React.ReactElement {
     let alive = true;
     setGridLoading(true);
     void api
-      .getTableRows('a-order-db-prod', active.table, {
+      .getTableRows(assetId, active.table, {
         page: active.page,
         pageSize: active.pageSize,
         sort: active.sort?.column,
@@ -193,7 +199,7 @@ export default function DatabaseDetail(): React.ReactElement {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.view, activeTab, active?.table, active?.page, active?.pageSize, active?.sort?.column, active?.sort?.direction, active?.filters]);
+  }, [state.view, activeTab, active?.table, active?.page, active?.pageSize, active?.sort?.column, active?.sort?.direction, active?.filters, assetId]);
 
   /* ============ 字段详情 / DDL 按需加载 ============ */
   useEffect(() => {
@@ -201,12 +207,12 @@ export default function DatabaseDetail(): React.ReactElement {
     if (active.mode === 'data') return;
     let alive = true;
     if (active.mode === 'fields') {
-      void api.getTableFields('a-order-db-prod', active.table).then((envelope) => {
+      void api.getTableFields(assetId, active.table).then((envelope) => {
         if (!alive || !envelope.ok) return;
         setFields(envelope.data);
       });
     } else if (active.mode === 'ddl') {
-      void api.getTableDdl('a-order-db-prod', active.table).then((envelope) => {
+      void api.getTableDdl(assetId, active.table).then((envelope) => {
         if (!alive || !envelope.ok) return;
         setDdl(envelope.data);
       });
@@ -215,7 +221,7 @@ export default function DatabaseDetail(): React.ReactElement {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.view, activeTab, active?.table, active?.mode]);
+  }, [state.view, activeTab, active?.table, active?.mode, assetId]);
 
   /* ============ SQL 查询页 ============ */
   const readSql = (): string => sqlRef.current?.innerText ?? DEFAULT_SQL_TEXT;
@@ -223,7 +229,7 @@ export default function DatabaseDetail(): React.ReactElement {
   const runSql = (): void => {
     const sql = readSql();
     void api
-      .runSqlQuery('a-order-db-prod', sql, { maxRows: 1000, timeoutMs: 15000 })
+      .runSqlQuery(assetId, sql, { maxRows: 1000, timeoutMs: 15000 })
       .then((envelope) => {
         if (!envelope.ok) {
           /* 三种失败的用户动作完全不同，必须分开说：
@@ -280,7 +286,7 @@ export default function DatabaseDetail(): React.ReactElement {
   /** 多格式导出：CSV / JSON / Markdown / SQL INSERT。 */
   const exportResults = (format: 'csv' | 'json' | 'md' | 'sql'): void => {
     setExportOpen(false);
-    void api.exportSqlCsv('a-order-db-prod', readSql(), format).then((envelope) => {
+    void api.exportSqlCsv(assetId, readSql(), format).then((envelope) => {
       if (envelope.ok) {
         downloadFile(envelope.data.fileName, envelope.data.content, envelope.data.mime);
         addToast(`结果集已导出 · ${format.toUpperCase()} · 审计 ${envelope.data.auditId}`);
@@ -299,7 +305,7 @@ export default function DatabaseDetail(): React.ReactElement {
       placeholder: 'prod-pg-readonly 的密码 / token',
       confirmLabel: '绑定',
       onSubmit: (secret: string) => {
-        void api.bindCredential('a-order-db-prod', { label: 'prod-pg-readonly', secret }).then((envelope) => {
+        void api.bindCredential(assetId, { label: 'prod-pg-readonly', secret }).then((envelope) => {
           if (!envelope.ok) {
             addToast(`绑定凭据被拒：${envelope.error?.code ?? 'E_PERMISSION_DENIED'} ${envelope.error?.message ?? ''}`);
             return;
@@ -312,7 +318,7 @@ export default function DatabaseDetail(): React.ReactElement {
   };
 
   const renewCredential = (): void => {
-    void api.renewCredential('a-order-db-prod').then((envelope) => {
+    void api.renewCredential(assetId).then((envelope) => {
       if (!envelope.ok) {
         addToast(`凭据轮换失败：${envelope.error?.code ?? ''} ${envelope.error?.message ?? ''}`);
         return;
@@ -331,16 +337,16 @@ export default function DatabaseDetail(): React.ReactElement {
   const renameAsset = (): void => {
     setModal({
       kind: 'prompt',
-      title: '重命名资产 · order_db',
+      title: `重命名资产 · ${dbAsset?.name ?? '数据库'}`,
       label: '新的资产名称：',
-      placeholder: 'order_db',
+      placeholder: dbAsset?.name ?? '新资产名',
       confirmLabel: '保存',
       onSubmit: (value: string) => {
         if (!value.trim()) {
           addToast('名称不能为空');
           return;
         }
-        void api.updateAsset('a-order-db-prod', { name: value.trim() }).then((envelope) => {
+        void api.updateAsset(assetId, { name: value.trim() }).then((envelope) => {
           addToast(envelope.ok ? '资产已重命名' : `重命名失败：${envelope.error?.message ?? '未知错误'}`);
           refresh();
         });
@@ -349,7 +355,7 @@ export default function DatabaseDetail(): React.ReactElement {
   };
 
   const refreshSchema = (): void => {
-    void api.getSqlSchema('a-order-db-prod').then((envelope) => {
+    void api.getSqlSchema(assetId).then((envelope) => {
       if (!envelope.ok) {
         addToast(`Schema 刷新失败：${envelope.error?.message ?? '网络异常'}`);
         return;
@@ -360,7 +366,7 @@ export default function DatabaseDetail(): React.ReactElement {
   };
 
   const reindexAsset = (): void => {
-    void api.advanceIndex('a-order-db-prod').then((envelope) => {
+    void api.advanceIndex(assetId).then((envelope) => {
       addToast(envelope.ok ? `已推进索引：${envelope.data.indexProgress}% · ${envelope.data.status}` : `索引推进失败：${envelope.error?.message ?? '未知错误'}`);
       refresh();
     });
@@ -445,7 +451,7 @@ export default function DatabaseDetail(): React.ReactElement {
     <div className={`view${state.view === 'detail-db' ? ' on' : ''}`} data-view="detail-db">
       <DetailHeader
         icon={<DatabaseIcon size={15} strokeWidth={1.4} />}
-        name="order_db"
+        name={dbAsset?.name ?? '数据库'}
         sub="PostgreSQL 15.4 · order-db.prod:5432/order_db"
         pills={
           <>
@@ -461,7 +467,7 @@ export default function DatabaseDetail(): React.ReactElement {
             <button
               className="btn p"
               onClick={() =>
-                openAssetChat({ assetId: 'a-order-db-prod', assetName: 'order_db', assetType: 'db' })
+                openAssetChat({ assetId, assetName: dbAsset?.name ?? '数据库', assetType: 'db' })
               }
               title="在当前页面唤起一条绑定该数据库的 AI 会话"
             >
@@ -848,7 +854,7 @@ export default function DatabaseDetail(): React.ReactElement {
         title="order_db"
         sub="PostgreSQL 15.4 · order-db.prod:5432/order_db"
         caps={CAPS_DB}
-        assetId="a-order-db-prod"
+        assetId={assetId}
         readOnly={state.readOnly}
         credential={credentialBlock}
         metrics={DB_METRICS}

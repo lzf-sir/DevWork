@@ -96,12 +96,12 @@ export function statusBarShape(conversationId?: string): Row {
     ? get<Row>('SELECT context_used, context_budget, cost_cny, model FROM usage_stat WHERE conversation_id = ?', conversationId)
     : undefined;
   if (!row) {
-    return { model: '未接入模型', contextUsed: 0, contextBudget: 204800, costCny: 0, state: '就绪' };
+    return { model: '未接入模型', contextUsed: 0, contextBudget: 128000, costCny: 0, state: '就绪' };
   }
   return {
     model: str(row.model) || '未接入模型',
     contextUsed: num(row.context_used),
-    contextBudget: num(row.context_budget) || 204800,
+    contextBudget: num(row.context_budget) || 128000,
     costCny: num(row.cost_cny),
     state: '就绪',
   };

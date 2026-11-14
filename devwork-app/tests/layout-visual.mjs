@@ -117,20 +117,28 @@ try {
   if (!ready) throw new Error('应用未在预期时间内完成挂载');
   await sleep(800);
 
-  /* ① 默认态：菜单展开 + 会话面板展开 */
+  /* ① 默认态：菜单展开 + 工作区收起（不固定任何 tab） */
   const menuBox0 = await evaluate(`(${BOX})('.menu-toggle')`);
   const sideBox0 = await evaluate(`(${BOX})('.side')`);
-  const ctxBox0 = await evaluate(`(${BOX})('.ctx')`);
-  const ptabX0 = await evaluate(`(${BOX})('.ptab-x')`);
-  const restore0 = await evaluate(`(${BOX})('.ctx-restore')`);
-  await shot('01-默认-菜单展开-会话展开');
+  const benchDefault = await evaluate(`(${BOX})('.bench')`);
+  const restoreDefault = await evaluate(`(${BOX})('.bench-restore')`);
+  await shot('01-默认-菜单展开-工作区收起');
   await shotClip('01a-放大-左上角菜单按钮', { x: 0, y: 0, width: 140, height: 44 });
-  await shotClip('01b-放大-右上角会话收起按钮', { x: 1120, y: 0, width: 320, height: 100 });
+  await shotClip('01b-放大-右上角工作区展开按钮', { x: 1120, y: 0, width: 320, height: 100 });
 
   check('默认态：左上角存在常驻菜单折叠按钮', !!menuBox0?.visible, menuBox0);
   check('默认态：菜单按钮在窗口左上角（x<40, y<44）', menuBox0 && menuBox0.x < 40 && menuBox0.y < 44, menuBox0);
-  check('默认态：会话面板右上角有收起按钮', !!ptabX0?.visible, ptabX0);
-  check('默认态：会话展开时不出现「展开」按钮', !restore0, restore0);
+  check('默认态：侧边工作区收起（不占版面）', !benchDefault?.visible, benchDefault);
+  check('默认态：右上角有工作区展开按钮', !!restoreDefault?.visible, restoreDefault);
+
+  /* ①b 展开工作区：后续关于收起/展开位置的断言以展开态为基准 */
+  await evaluate(`(${CLICK})('.bench-restore')`);
+  await sleep(700);
+  const ctxBox0 = await evaluate(`(${BOX})('.bench')`);
+  const ptabX0 = await evaluate(`(${BOX})('.ptab-x')`);
+  const restore0 = await evaluate(`(${BOX})('.bench-restore')`);
+  check('展开工作区后右上角出现收起按钮', !!ptabX0?.visible, ptabX0);
+  check('展开后不再显示「展开」按钮', !restore0, restore0);
 
   /* ② 收起菜单：按钮位置必须纹丝不动 */
   await evaluate(`(${CLICK})('.menu-toggle')`);
@@ -154,8 +162,8 @@ try {
   /* ④ 收起会话面板：展开按钮必须停在会话面板原来的右上角 */
   await evaluate(`(${CLICK})('.ptab-x')`);
   await sleep(700);
-  const ctxBox1 = await evaluate(`(${BOX})('.ctx')`);
-  const restore1 = await evaluate(`(${BOX})('.ctx-restore')`);
+  const ctxBox1 = await evaluate(`(${BOX})('.bench')`);
+  const restore1 = await evaluate(`(${BOX})('.bench-restore')`);
   const topbarRight = await evaluate(`(${BOX})('.win-controls')`);
   await shot('03-会话收起-右上角展开按钮');
   await shotClip('03a-放大-右上角会话展开按钮', { x: 1120, y: 0, width: 320, height: 100 });
@@ -170,9 +178,9 @@ try {
   check('顶栏只保留菜单折叠按钮（右栏入口已迁走）', topbarToggles === 1, { topbarToggles });
 
   /* ⑥ 再点右上角展开会话 */
-  await evaluate(`(${CLICK})('.ctx-restore')`);
+  await evaluate(`(${CLICK})('.bench-restore')`);
   await sleep(700);
-  const ctxBox2 = await evaluate(`(${BOX})('.ctx')`);
+  const ctxBox2 = await evaluate(`(${BOX})('.bench')`);
   await shot('04-会话重新展开');
   check('会话面板可重新展开', !!ctxBox2?.visible, ctxBox2);
 } finally {

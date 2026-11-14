@@ -22,7 +22,7 @@ import {
 } from '../db/repositories';
 import { check, type PermissionContext } from '../kernel/permission';
 import { TOOL_REGISTRY, toolAction, toolIsWrite, toolRisk, toolSpec } from '../config/tools';
-import { deriveToolFace, gatewayToolFace, derivedTool, type ToolFace } from '../config/tool-catalog';
+import { deriveToolFace, gatewayToolFace, derivedTool, type DerivedTool, type ToolFace } from '../config/tool-catalog';
 import { executeAgentTool } from './agent-tools';
 import { executeFileWrite, executeDbWrite, executeSrvTemplate, rollbackWritePlan } from './write-executor';
 import {
@@ -31,6 +31,11 @@ import {
 } from './session-approvals';
 import { requireCredential } from './credential';
 import { createGateway, detectIntent, type AgentEvent, type GatewayContext } from './llm-gateway';
+import { ingestUserTurn } from './shadow-scheduler';
+import {
+  buildBudgetedHistory, compactConversation, estimateTokens, measureContext, resolveContextWindow,
+} from './context-budget';
+import { readTodoCard, readTodoPlan, todoPromptOf, writeTodoPlan } from './todo';
 
 type Row = Record<string, unknown>;
 
@@ -52,7 +57,7 @@ interface InsertedCard {
   payload: Record<string, unknown>;
 }
 
-async function insertCard(
+export async function insertCard(
   conversationId: string,
   kind: string,
   payload: Record<string, unknown>,
@@ -94,6 +99,23 @@ function targetTypeOf(toolName: string, args: Record<string, unknown>): string {
 }
 
 /**
+ * 写操作真正落到的资产。
+ *
+ * workspace 型写工具（fs_write_file）派生出来的资产是**工作区本身**，
+ * 而工作区没有自己的仓库 —— 直接拿它去解析路径会一路回落到共享演示仓库，
+ * 等于往公共目录里写代码。静态登记表里 fs_write_file 归属的本来就是代码资产，
+ * 这里把派生面的 workspace 绑定归位到代码主实例：
+ *  - 工单执行期内，解析层会把它改写成本单的工作树（exec-context 别名）；
+ *  - 会话内直接审批时，它落到工作区自己克隆的仓库，而不是沙箱演示仓库。
+ */
+function writeTargetAssetId(toolName: string, tool: DerivedTool | undefined, face: ToolFace): string {
+  if (tool && tool.entry.assetType !== 'workspace') return tool.assetId;
+  const codeTool = face.all.find((item) => item.entry.assetType === 'code' && item.entry.writeAction);
+  if (codeTool) return codeTool.assetId;
+  return tool?.assetId ?? toolSpec(toolName).assetId;
+}
+
+/**
  * 写计划的统一执行入口（三层防线）。只对 V2 可执行工具真执行；
  * 演示轨迹遗留名（fs_truncate_log 等）没有可执行内容，如实返回不假装。 */
 async function executeWritePlan(
@@ -104,7 +126,7 @@ async function executeWritePlan(
   workspaceId: string,
 ): Promise<{ ok: boolean; message: string; rollbackRef?: string; diskChanged: boolean }> {
   const tool = derivedTool(face, toolName);
-  const assetId = tool?.assetId ?? toolSpec(toolName).assetId;
+  const assetId = writeTargetAssetId(toolName, tool, face);
   switch (toolName) {
     case 'code_edit':
     case 'fs_write_file':
@@ -140,25 +162,11 @@ async function serviceCheck(
   return verdict.auditId;
 }
 
-/** 从库里还原多轮上下文（最近 12 条 user/assistant 文本，时间正序）。 */
-async function buildHistory(conversationId: string, excludeContent: string): Promise<GatewayContext['history']> {
-  const rows = all<{ kind: string; payload: string; actor: string }>(
-    'SELECT kind, payload, actor FROM message WHERE conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT 24',
-    conversationId,
-  );
-  const history: { role: 'user' | 'assistant'; content: string }[] = [];
-  rows.reverse().forEach((row) => {
-    let payload: Record<string, unknown> = {};
-    try { payload = JSON.parse(row.payload) as Record<string, unknown>; } catch { return; }
-    if (row.kind === 'bubble') {
-      const content = String(payload.content ?? '');
-      if (content && content !== excludeContent) history.push({ role: 'user', content });
-    } else if (row.kind === 'text' || row.kind === 'conclusion') {
-      const content = String(payload.content ?? '');
-      if (content) history.push({ role: 'assistant', content: content.slice(0, 1200) });
-    }
-  });
-  return history;
+/** 从库里还原多轮上下文（按上下文预算裁剪，压缩后从摘要卡之后算起）。
+ *  与上一版的差别：被预算截掉的旧消息现在有去处 —— 摘要卡替它们进提示，
+ *  而不是静默消失让模型以为自己什么都没看过。 */
+export async function buildHistory(conversationId: string, excludeContent: string): Promise<GatewayContext['history']> {
+  return buildBudgetedHistory(conversationId, excludeContent).history;
 }
 
 /** 引用片段摘要：前 5 行足够浮层展示，且原文可点开核对。 */
@@ -168,7 +176,7 @@ function snippetOf(content: string): string {
 
 /** 派生工具面 + 权限内核 + 会话审批记忆的真实执行器。
  *  返回结构里的 ok 是"执行是否成功"的唯一事实来源，工具卡状态由它推导。 */
-function makeToolExecutor(
+export function makeToolExecutor(
   ctx: PermissionContext,
   conversationId: string,
   identity: Identity,
@@ -258,19 +266,8 @@ function toolStatusOf(effect: string, ok: boolean): { status: string; cls: 'ok' 
   return ok ? { status: '已自动放行', cls: 'ok' } : { status: '失败', cls: 'warn' };
 }
 
-/** token 估算：中英混排按 1 token ≈ 1.5 字符，仅用于展示与预算告警，不用于计费对账。 */
-function estimateTokens(chars: number): number {
-  return Math.max(1, Math.ceil(chars / 1.5));
-}
-
-/** 上下文实际占用：按本会话全部消息卡体的字符数估算。 */
-function contextCharsOf(conversationId: string): number {
-  const row = get<{ n: number }>(
-    'SELECT COALESCE(SUM(LENGTH(payload)), 0) AS n FROM message WHERE conversation_id = ?',
-    conversationId,
-  );
-  return Number(row?.n ?? 0);
-}
+/** 上下文实际占用由 context-budget 统一口径计算（含摘要卡与预算裁剪），
+ *  这里不再单独维护一份"全表字符数"的近似值 —— 两份口径必然漂移。 */
 
 /** 一次提问 → 完整轨迹。onEvent 非空时逐事件回调（供 SSE 流式端点使用）。 */
 export async function sendMessage(
@@ -327,7 +324,49 @@ export async function sendMessage(
       attachments,
     }, 'user');
     cards.push(userCard);
+    /* P1.5 影子链路取料：把这一轮的话记成一条 Trigger，供 Gate 研判。
+     * 旁路观测 —— 不 await、内部吞异常，挂了也不影响本轮生成。
+     * regenerate 不取料：重试沿用的是同一条用户消息，重复取料会污染分母。 */
+    ingestUserTurn({
+      workspaceId: conversation.workspace_id,
+      conversationId,
+      messageId: userCard.id,
+      conversationTitle: conversation.title,
+      actor: identity.name,
+      content: input.content,
+      assetId: conversation.asset_id,
+    });
   }
+
+  /* 工具面只算一次：网关拿它当 toolsSpec，预算拿它估固定开销，两处必须同一份。 */
+  const toolFace = gatewayToolFace(face);
+
+  /* ---- 自动压缩：上下文逼近上限时先提炼再继续 ----
+   * 放在生成之前，而不是等供应商报超限：真撞上限时模型的失败信息通常只是
+   * "context length exceeded"，用户看到的是一次莫名其妙的失败。 */
+  const preEvents: AgentEvent[] = [];
+  const windowInfo = resolveContextWindow(gateway.modelName);
+  const usageBefore = measureContext(conversationId, { model: gateway.modelName, toolCount: toolFace.length });
+  if (usageBefore.shouldCompact) {
+    const compacted = await compactConversation({
+      conversationId, mode: 'auto', model: gateway.modelName, gateway,
+    });
+    if (!compacted.skipped && compacted.card) {
+      cards.push({ id: compacted.cardId ?? compacted.card.id, kind: 'summary', payload: compacted.card.payload });
+      preEvents.push({
+        type: 'notice',
+        level: 'info',
+        title: '已自动压缩上下文',
+        content: [
+          `上下文占用达到 ${Math.round((usageBefore.ratio * 100))}%（${Math.round(usageBefore.used / 1000)}k / ${Math.round(windowInfo.window / 1000)}k），`
+            + `已将早前 ${compacted.covered} 条对话折叠为一段摘要，继续本轮任务。`,
+          `摘要由${compacted.summary?.source === 'model' ? `模型（${compacted.summary.model}）提炼` : '规则提炼（未接入模型）'}，`
+            + `约 ${compacted.before} → ${compacted.after} tokens。原始消息仍保留在时间线里，只是不再整段发给模型。`,
+        ].join('\n'),
+      });
+    }
+  }
+  for (const event of preEvents) onEvent?.(event);
 
   const events: AgentEvent[] = [];
   /** 本轮真实产生的引用 id —— 右栏「上下文 · 命中」只列本轮证据，不再展示静态快照。 */
@@ -339,12 +378,17 @@ export async function sendMessage(
     assetIds,
     readOnlyMode: readOnly,
     history: await buildHistory(conversationId, input.content),
-    toolFace: gatewayToolFace(face),
+    toolFace,
+    /* 清单进系统提示：长任务里模型最容易丢的就是"我排到第几步了"。 */
+    todoText: todoPromptOf(readTodoPlan(conversationId)),
     executeTool: makeToolExecutor(ctx, conversationId, identity, conversation.workspace_id, face),
   })) {
     events.push(event);
     onEvent?.(event);
   }
+  /* 压缩说明要排在回复前面（它是"本轮开始前发生的事"），
+   * 而不是流结束后补一条解释。 */
+  events.unshift(...preEvents);
 
   /* B16：text_delta 缓冲 —— 流式增量聚合成一张 text 卡落库（可回放）。 */
   let textBuffer = '';
@@ -369,6 +413,20 @@ export async function sendMessage(
         cards.push(await insertCard(conversationId, 'plan', {
           intent: event.intent, steps: event.steps, degraded: event.degraded === true,
         }));
+        break;
+      }
+      case 'todo': {
+        /* 同一条会话只留一张清单卡（原位更新）—— 10 步任务不该产生 10 张卡。 */
+        try {
+          const { card } = writeTodoPlan(conversationId, event.items, { degraded: event.degraded === true });
+          cards.push({ id: card.id, kind: card.kind, payload: card.payload });
+        } catch (error) {
+          cards.push(await insertCard(conversationId, 'notice', {
+            level: 'warn',
+            title: '任务清单未能建立',
+            content: error instanceof Error ? error.message : String(error),
+          }));
+        }
         break;
       }
       case 'text': {
@@ -475,7 +533,7 @@ export async function sendMessage(
             args: parsedArgs,
             targetType: targetTypeOf(effective.toolName, parsedArgs),
             memoryKey,
-            derivedAssetId: derivedTool(face, effective.toolName)?.assetId ?? assetId,
+            derivedAssetId: writeTargetAssetId(effective.toolName, derivedTool(face, effective.toolName), face),
           };
           cardPayload.constraints = verdict.constraints ?? { approvalCard: true, executable: false, diskChanged: false };
           const card = await insertCard(conversationId, 'approval_card', cardPayload);
@@ -507,6 +565,13 @@ export async function sendMessage(
             newId('tc'), cards[cards.length - 1].id, conversationId, effective.toolName, effective.args,
             `${effective.result} · ${verdict.reason}`, verdict.effect, effective.durationMs, verdict.auditId, nowIso(),
           );
+        }
+
+        /* 清单更新：执行器已经把最新状态写进那张卡，这里把最新 payload 一并回传，
+         * 前端按 id 原位替换 —— 用户在长任务里看到的是同一张清单在推进。 */
+        if (event.toolName === 'todo_write') {
+          const todoCard = readTodoCard(conversationId);
+          if (todoCard) cards.push({ id: todoCard.cardId, kind: 'todo', payload: todoCard.payload });
         }
         break;
       }
@@ -567,7 +632,10 @@ export async function sendMessage(
 
     /* 用量：优先用模型返回的真实 usage；没有（未接入模型 / 供应商不返回）才估算。
      * cost 仅当配置了单价才累加，未配价目一律保持 0（不编造价格）。 */
-    const contextUsed = estimateTokens(contextCharsOf(conversationId));
+    const modelName = providerUsage?.model ?? gateway.modelName;
+    /* 上下文占用按 context-budget 的真实口径重算（含摘要卡、预算裁剪、本轮输入），
+     * 不再用"全表 payload 字符数"——那个数在压缩之后只会一直虚高。 */
+    const contextUsed = measureContext(conversationId, { model: modelName, toolCount: toolFace.length }).used;
     const completionChars = cards
       .filter((card) => card.kind === 'text' || card.kind === 'conclusion' || card.kind === 'notice')
       .reduce((sum, card) => sum + String(card.payload.content ?? '').length, 0);
@@ -578,19 +646,18 @@ export async function sendMessage(
     const costDelta = Number.isFinite(pricePerK) && pricePerK > 0
       ? Number(((billableTokens / 1000) * pricePerK).toFixed(4))
       : 0;
-    const modelName = providerUsage?.model ?? gateway.modelName;
 
     const existing = get<{ id: string }>('SELECT id FROM usage_stat WHERE conversation_id = ?', conversationId);
     if (existing) {
       run(
-        'UPDATE usage_stat SET context_used = ?, cost_cny = ROUND(cost_cny + ?, 4), model = ? WHERE conversation_id = ?',
-        contextUsed, costDelta, modelName, conversationId,
+        'UPDATE usage_stat SET context_used = ?, context_budget = ?, cost_cny = ROUND(cost_cny + ?, 4), model = ? WHERE conversation_id = ?',
+        contextUsed, windowInfo.window, costDelta, modelName, conversationId,
       );
     } else {
       run(
         `INSERT INTO usage_stat (id,conversation_id,context_used,context_budget,cost_cny,model)
          VALUES (?,?,?,?,?,?)`,
-        newId('usage'), conversationId, contextUsed, 204800, costDelta, modelName,
+        newId('usage'), conversationId, contextUsed, windowInfo.window, costDelta, modelName,
       );
     }
     /* 单轮用量打点：写进本轮回填的最后一张卡的 payload（前端在回复下方展示）。
@@ -604,7 +671,10 @@ export async function sendMessage(
       costCny: costDelta,
       model: modelName,
     };
-    const lastCard = cards[cards.length - 1];
+    /* 用量挂在「有正文的那张卡」上，而不是时间线最后一张：
+     * 清单卡也会被追加进 cards，把 tokens 挂到清单上，前端就没地方显示了。 */
+    const lastCard = [...cards].reverse()
+      .find((card) => card.kind === 'text' || card.kind === 'conclusion' || card.kind === 'notice');
     if (lastCard) {
       lastCard.payload = { ...lastCard.payload, usage: turnUsage };
       run('UPDATE message SET payload = ? WHERE id = ?', JSON.stringify(lastCard.payload), lastCard.id);
@@ -688,7 +758,9 @@ function buildPanelPayloads(
     ['历史对话', tokenOf(historyChars)],
   ];
   const totalTokens = breakdownDefs.reduce((sum, [, tokens]) => sum + tokens, 0);
-  const budget = 204800;
+  /* 预算跟着模型走：写死 204800 会让 32k 的模型一直显示"还有九成余量"。 */
+  const usageModel = String(get<Row>('SELECT model FROM usage_stat WHERE conversation_id = ?', conversationId)?.model ?? '');
+  const budget = resolveContextWindow(usageModel).window;
   const bars = breakdownDefs.map(([name, tokens]) => ({
     name,
     width: Math.min(100, Math.max(2, Math.round((tokens / 1024 / 32) * 100))),
@@ -880,8 +952,8 @@ export async function truncateMessages(
     );
   }
 
-  /* 上下文占用按剩余消息重算（与 sendMessage 的估算口径一致）。 */
-  const contextUsed = estimateTokens(await contextCharsOf(conversationId));
+  /* 上下文占用按剩余内容重算（与 sendMessage 同一口径：含摘要卡与预算裁剪）。 */
+  const contextUsed = measureContext(conversationId).used;
   const usageRow = get<{ id: string }>('SELECT id FROM usage_stat WHERE conversation_id = ?', conversationId);
   if (usageRow) {
     run('UPDATE usage_stat SET context_used = ? WHERE conversation_id = ?', contextUsed, conversationId);

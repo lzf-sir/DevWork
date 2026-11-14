@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { api, type TermLine } from '../api/client';
 import { useLiveData, useLiveRefresh } from '../api/live';
+import { useAssetTarget } from '../hooks/useAssetTarget';
 import { Banner, DetailHeader, DetailTabs, GearSvg, KV, MetricGrid, Pill } from '../components/ui';
 import { ChatIcon, DotsIcon, ServerIcon } from '../components/icons';
 import AssetConfigDrawer from '../components/AssetConfigDrawer';
@@ -37,6 +38,10 @@ export default function ServerDetail(): React.ReactElement {
   /** ⋯ 菜单（重命名 / 新建终端 / 断开当前会话）。 */
   const [menuOpen, setMenuOpen] = useState<boolean>(false);
 
+  /* 当前工作区里的服务器资产：不再写死 a-order-api（那是 w-ops 的演示资产）。 */
+  const serverAsset = useAssetTarget('server');
+  const assetId = serverAsset?.id ?? '';
+
   useEffect(() => {
     const el = termRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -63,8 +68,9 @@ export default function ServerDetail(): React.ReactElement {
 
   /* B2：会话数来自 GET /api/assets/:id/terminal/sessions（服务端上限 5）。 */
   useEffect(() => {
+    if (!assetId) return;
     let alive = true;
-    void api.listTerminalSessions('a-order-api').then((envelope) => {
+    void api.listTerminalSessions(assetId).then((envelope) => {
       if (alive && envelope.ok && Array.isArray(envelope.data)) {
         setSessionCount(Math.max(1, envelope.data.length));
         const last = envelope.data[envelope.data.length - 1];
@@ -74,12 +80,12 @@ export default function ServerDetail(): React.ReactElement {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [assetId]);
 
   /** B2/B4：新建会话走 POST，超过上限由服务端返回 409 E_TERMINAL_SESSION_LIMIT。 */
   const createSession = (): void => {
     setDetailTab('main');
-    void api.createTerminalSession('a-order-api').then((envelope) => {
+    void api.createTerminalSession(assetId).then((envelope) => {
       if (!envelope.ok) {
         setLines((prev) => [
           ...prev,
@@ -89,7 +95,7 @@ export default function ServerDetail(): React.ReactElement {
         addToast('终端会话已达上限 5 个');
         return;
       }
-      void api.listTerminalSessions('a-order-api').then((listed) => {
+      void api.listTerminalSessions(assetId).then((listed) => {
         if (listed.ok && Array.isArray(listed.data)) setSessionCount(Math.max(1, listed.data.length));
       });
       setSessionId(envelope.data.id);
@@ -112,7 +118,7 @@ export default function ServerDetail(): React.ReactElement {
 
     // 裁决由服务端 PermissionKernel + CommandExecutor 完成；前端只展示 allow / deny / suggest。
     void api
-      .executeCommand('a-order-api', { sessionId, command: value })
+      .executeCommand(assetId, { sessionId, command: value })
       .then((envelope) => {
         if (!envelope.ok) {
           appendResult(prompt, [{ cls: 'er', text: `✕ ${envelope.error?.message ?? '执行失败'}` }]);
@@ -155,16 +161,16 @@ export default function ServerDetail(): React.ReactElement {
   const renameAsset = (): void => {
     setModal({
       kind: 'prompt',
-      title: '重命名资产 · order-api-01',
+      title: `重命名资产 · ${serverAsset?.name ?? '服务器'}`,
       label: '新的资产名称：',
-      placeholder: 'order-api-01',
+      placeholder: serverAsset?.name ?? '新资产名',
       confirmLabel: '保存',
       onSubmit: (value: string) => {
         if (!value.trim()) {
           addToast('名称不能为空');
           return;
         }
-        void api.updateAsset('a-order-api', { name: value.trim() }).then((envelope) => {
+        void api.updateAsset(assetId, { name: value.trim() }).then((envelope) => {
           addToast(envelope.ok ? '资产已重命名' : `重命名失败：${envelope.error?.message ?? '未知错误'}`);
           refresh();
         });
@@ -172,14 +178,14 @@ export default function ServerDetail(): React.ReactElement {
     });
   };
   const disconnectSession = (): void => {
-    void api.closeTerminalSession('a-order-api', sessionId).then((envelope) => {
+    void api.closeTerminalSession(assetId, sessionId).then((envelope) => {
       if (!envelope.ok) {
         addToast(`断开失败：${envelope.error?.message ?? '未知错误'}`);
         return;
       }
       setLines((prev) => [...prev, { cls: 'dm', text: `# 会话 ${sessionId} 已断开` }, { text: '' }]);
       addToast(`终端会话 ${sessionId} 已断开`);
-      void api.listTerminalSessions('a-order-api').then((listed) => {
+      void api.listTerminalSessions(assetId).then((listed) => {
         if (listed.ok && Array.isArray(listed.data)) {
           setSessionCount(Math.max(1, listed.data.length));
           const last = listed.data[listed.data.length - 1];
@@ -193,7 +199,7 @@ export default function ServerDetail(): React.ReactElement {
     <div className={`view${state.view === 'detail-server' ? ' on' : ''}`} data-view="detail-server">
       <DetailHeader
         icon={<ServerIcon size={15} strokeWidth={1.4} />}
-        name="order-api-01"
+        name={serverAsset?.name ?? '服务器'}
         sub="SSH · deploy@10.20.1.31 · /opt/app"
         pills={
           <>
@@ -209,7 +215,7 @@ export default function ServerDetail(): React.ReactElement {
             <button
               className="btn p"
               onClick={() =>
-                openAssetChat({ assetId: 'a-order-api', assetName: 'order-api-01', assetType: 'server' })
+                openAssetChat({ assetId, assetName: serverAsset?.name ?? '服务器', assetType: 'server' })
               }
               title="在当前页面唤起一条绑定该服务器的 AI 会话"
             >
@@ -305,10 +311,10 @@ export default function ServerDetail(): React.ReactElement {
 
       <AssetConfigDrawer
         open={state.configOpen && state.view === 'detail-server'}
-        title="order-api-01"
+        title={serverAsset?.name ?? '服务器'}
         sub="SSH · deploy@10.20.1.31 · /opt/app"
         caps={CAPS_SERVER}
-        assetId="a-order-api"
+        assetId={assetId}
         readOnly={state.readOnly}
         metrics={SERVER_METRICS}
         kv={SERVER_CONN_KV.map((row) => ({ k: row.k, v: row.v }))}

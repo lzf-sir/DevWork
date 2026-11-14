@@ -30,6 +30,14 @@ export const TOOL_REGISTRY: Record<string, ToolSpec> = {
     assetId: 'w-ops', action: 'asset.read',
     needsCredential: false, risk: 'low', label: '资产清单',
   },
+  /* 任务清单是 Agent 自己的状态，不碰任何用户资产，所以：
+   *  - action 用 'todo.plan' 而不是 'todo.write' —— isWriteAction 会按 write 判定，
+   *    那样每一步清单更新都会弹出审批卡，长任务根本没法跑；
+   *  - risk=low、无 writeAction → 直接走 capability=read 的自动放行分支。 */
+  todo_write: {
+    assetId: 'w-ops', action: 'todo.plan',
+    needsCredential: false, risk: 'low', label: '任务清单',
+  },
   browser_navigate: {
     assetId: 'w-ops', action: 'browser.navigate',
     needsCredential: false, risk: 'low', label: '浏览器导航',

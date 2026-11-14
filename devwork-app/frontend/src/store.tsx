@@ -2,6 +2,7 @@ import React, {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -11,20 +12,39 @@ import type {
   Message,
   Project,
   ViewName,
+  WaitingTicket,
 } from './api/client';
 /* B2：初始状态只取 api 层的离线 fallback 快照，组件不直接引用 src/data/mock.ts。
  * 启动后由 App.bootstrap()/hydrateFromRest() 用 REST 结果整体覆盖。 */
 import { MOCK_SNAPSHOT } from './api/mock';
-import { api as restApi } from './api/client';
+import { api as restApi, setCurrentWorkspaceId } from './api/client';
 import { cardsToThread, toSidebarData } from './api/adapters';
+import { waitingLevel } from './utils/waiting';
+
+/**
+ * 合并本轮返回的卡片到时间线：**同 id 原位替换，其余追加**。
+ *
+ * 为什么不能直接 concat：任务清单卡是"一张卡原位更新"的（服务端每次更新都
+ * 回传同一个消息 id）。直接追加会让长任务每推进一步就多一张清单，
+ * 20 步之后时间线全是清单副本，用户反而看不出进度。
+ */
+function mergeThread(current: Message[], incoming: Message[]): Message[] {
+  if (incoming.length === 0) return current;
+  const next = [...current];
+  incoming.forEach((card) => {
+    const index = next.findIndex((item) => item.id === card.id);
+    if (index >= 0) next[index] = card;
+    else next.push(card);
+  });
+  return next;
+}
 
 /* ===================== 类型 ===================== */
 
 export type HotkeyKind = 'send' | 'sqlRun' | 'openFile' | 'saveCode' | 'clearTerm' | 'stop' | 'find';
 
 /** 主题偏好。'system' 跟随 prefers-color-scheme，实际生效值由 App 解析。 */
-export type Theme = 'system' | 'light' | 'dark';
-export const THEME_LABEL: Record<Theme, string> = { system: '跟随系统', light: '浅色', dark: '深色' };
+export type Theme = 'system' | 'light' | 'dark';export const THEME_LABEL: Record<Theme, string> = { system: '跟随系统', light: '浅色', dark: '深色' };
 const THEME_KEY = 'devwork-theme';
 
 export function readStoredTheme(): Theme {
@@ -100,17 +120,105 @@ export interface CitationState {
 }
 
 /**
- * 会话区右侧的**悬浮气泡面板**。
+ * 侧边工作区能装的内容类型。
  *
- * 原来「上下文 / 执行 / 产物」是右栏里的三个常驻 Tab，但它们回答的是
- * 「刚才那轮到底怎么回事」——**追问型**信息，而不是「我现在在做什么」的常驻信息。
- * 摆在右栏常驻，会把右栏这个位置占满，真正的工具位（浏览器 / 文件）反而没地方放。
- * 所以改成：三个悬浮按钮贴在会话区右缘，点开才出气泡，问完即收。
+ * 只放**详情**：清单类内容（产物列表）不进工作区，用浮层选完再开详情 tab。
+ *   ctx     —— 上下文：这一轮它看到了什么、走了几步
+ *   todo    —— 任务列表：长任务的待办清单与进度
+ *   browser —— 内置浏览器：看网页（Agent 也能导航它）
+ *   artifact—— 单个产物的详情预览（按文件区分，可并存多个）
+ *
+ * 入口只有会话右缘那四个固定图标，kind 与入口一一对应；
+ * 产物是唯一「一个文件一个 tab」的 kind，它的入口先弹选择浮层。
  */
-export type HudPane = 'ctx' | 'run' | 'out' | null;
+export type BenchPaneKind = 'ctx' | 'todo' | 'browser' | 'artifact';
 
-/** 右栏工作台的 Tab：内置浏览器 / 文件查看 / 终端。 */
-export type BenchTab = 'browser' | 'file' | 'term';
+/** 工作区里一个 tab。key 唯一：常驻类 kind 就用 kind 本身，产物用 `artifact:<id>`。 */
+export interface BenchTab {
+  key: string;
+  kind: BenchPaneKind;
+  title: string;
+  /** kind === 'artifact' 时指向哪个产物。 */
+  artifactId?: string;
+}
+
+/** 各类内容在 tab 上的默认标题（产物 tab 用文件名，不查这张表）。 */
+export const BENCH_TITLES: Record<Exclude<BenchPaneKind, 'artifact'>, string> = {
+  ctx: '上下文',
+  todo: '任务列表',
+  browser: '浏览器',
+};
+
+/** 工作区 tab 上限：再多就不是「并排看几个」，而是把 tab 栏当历史列表用了。 */
+const BENCH_TAB_LIMIT = 12;
+
+/** 追加 tab 并保留最近 N 个（已经在里面的不重复加）。 */
+function pushBenchTab(tabs: BenchTab[], tab: BenchTab): BenchTab[] {
+  if (tabs.some((item) => item.key === tab.key)) {
+    return tabs.map((item) => (item.key === tab.key ? { ...item, title: tab.title } : item));
+  }
+  return [...tabs, tab].slice(-BENCH_TAB_LIMIT);
+}
+
+/**
+ * 会话标签页 —— 主区域顶部那一排，每个 tab 一条会话。
+ *
+ * 与 `activeConversationId` 的分工：
+ *   **tabs 回答「打开了哪些」，activeConversationId 回答「正在看哪个」。**
+ * 只加 tab 而不改 active 的语义，是为了让所有读 `state.activeConversationId`
+ * 的旧代码零改动就能工作；而每个 tab 自己的草稿 / 流式文本 / 模型选择
+ * 都按 conversationId 分桶存（草稿在 useChatSession 的模块级缓存，流式文本在 streams，
+ * 模型选择在 conversationModels），
+ * 所以切 tab 既不会丢字，也不会把 A 会话的流式内容画到 B 会话里。
+ */
+export interface SessionTab {
+  id: string;
+  title: string;
+}
+
+/** 会话 tab 的本地持久化：只存 id/title，重启后恢复「上次开着的几个会话」。 */
+const SESSION_TABS_KEY = 'devwork-session-tabs';
+
+export function readStoredSessionTabs(): SessionTab[] {
+  try {
+    const raw = localStorage.getItem(SESSION_TABS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item): item is SessionTab => {
+        if (!item || typeof item !== 'object') return false;
+        const row = item as Partial<SessionTab>;
+        return typeof row.id === 'string' && row.id !== '' && typeof row.title === 'string';
+      })
+      .slice(0, 20);
+  } catch {
+    /* 存坏了就当没开过，不影响启动。 */
+    return [];
+  }
+}
+
+function persistSessionTabs(tabs: SessionTab[]): void {
+  try {
+    /* 只持久化**服务端真 id**。c-new-* / c-asset-* 是还没落库的本地临时 id，
+     * 存下来重启后就变成一排点开是空的幽灵标签页 —— 恢复得越多越像坏了。
+     * 它们拿到真 id 之后会再走一次持久化，所以不会真的丢。 */
+    const durable = tabs.filter((tab) => !/^c-(new|asset)-/.test(tab.id));
+    localStorage.setItem(SESSION_TABS_KEY, JSON.stringify(durable));
+  } catch {
+    /* 存不进去也不影响本次会话。 */
+  }
+}
+
+/** 打开或激活一条 tab（纯函数，便于在 setState 回调里安全使用）。 */
+function upsertSessionTab(tabs: SessionTab[], id: string, title: string): SessionTab[] {
+  if (!id) return tabs;
+  if (tabs.some((tab) => tab.id === id)) {
+    return tabs.map((tab) => (tab.id === id ? { ...tab, title: title || tab.title } : tab));
+  }
+  /* 上限 20：再多就不是「并行盯几个」，而是把 tab 栏当历史列表用了。 */
+  return [...tabs, { id, title: title || '未命名会话' }].slice(-20);
+}
 
 export type ModalSpec =
   | {
@@ -153,22 +261,22 @@ export interface AppState {
   /** 资产会话坞是否折叠（折叠 = 只留一条窄边条，页面空间全还给内容）。 */
   assetChatCollapsed: boolean;
   threads: Record<string, Message[]>;
-  /** 会话区右侧悬浮气泡：当前展开的面板（null = 全收）。 */
-  hudPane: HudPane;
-  /** 右栏工作台当前 Tab。 */
-  benchTab: BenchTab;
+  /** 侧边工作区打开着的 tab（按打开顺序）。是「内容显示区」，不是固定栏位。 */
+  benchTabs: BenchTab[];
+  /** 工作区当前激活的 tab key（空串 = 一个都没开，显示空态）。 */
+  benchActive: string;
+  /** 产物选择浮层是否打开 —— 产物清单不进工作区，只在浮层里选，选完开详情 tab。 */
+  artifactPickerOpen: boolean;
   /** 内置浏览器当前地址（用户手动导航与 Agent 导航共用这一份）。 */
   browserUrl: string;
-  /** 右栏「文件」Tab 已打开的产物标签页（按打开顺序，可多个并存）。 */
-  artifactTabs: { id: string; name: string }[];
-  /** 右栏「文件」Tab 正在查看的产物（= artifactTabs 里的激活项；null = 无打开项）。 */
-  artifactView: { id: string; name: string } | null;
   detailTab: string;
   /** 资产配置抽屉（能力授权 / 凭据 / 资产信息）是否打开。 */
   configOpen: boolean;
   settingsSection: string;
   orgSection: string;
   ctxTokens: number;
+  /** 上下文预算（k）：跟着模型窗口走，改动只在服务端（模型/设置页），前端只展示。 */
+  ctxBudget: number;
   cost: number;
   statusText: string;
   statusNote: string;
@@ -190,23 +298,43 @@ export interface AppState {
   sqlPreset: string | null;
   /** 会话级模型选择：conversationId → 模型名（空 = 跟随全局默认）。 */
   conversationModels: Record<string, string>;
+  /** 打开着的会话 tab（按打开顺序；activeConversationId 指向其中一项）。 */
+  sessionTabs: SessionTab[];
+  /** 每个会话各自的流式文本：多 tab 并行时按会话各画各的，绝不串台。 */
+  streams: Record<string, string>;
+  /** 协作流视图正对着哪个会话（null = 未打开）。协作流不属于会话 tab，是它的伴随视图。 */
+  collabFor: string | null;
+  /**
+   * 「待人」清单：谁停下来等我了。
+   *
+   * 刻意放在全局而不是各组件自取：侧栏徽标、会话 tab 橙点、命令面板说的是
+   * 同一件事，各拉一次就会出现「侧栏 2、tab 上没点」这种自相矛盾的界面。
+   */
+  waiting: WaitingTicket[];
+  /** 上次成功拉到待人清单的时间（ISO）。失败时保留旧值，徽标不闪没。 */
+  waitingAt: string;
 }
 
 export interface StoreApi {
   state: AppState;
   navigate: (view: ViewName) => void;
-  /** 开 / 关会话区右侧的悬浮气泡面板。 */
-  setHudPane: (pane: HudPane) => void;
-  /** 切换右栏工作台 Tab。 */
-  setBenchTab: (tab: BenchTab) => void;
+  /**
+   * 在侧边工作区打开某类内容：已开则激活，未开则新加一个 tab（并展开工作区）。
+   * 这是会话右缘图标与命令面板共用的**唯一入口**。
+   */
+  openBench: (kind: Exclude<BenchPaneKind, 'artifact'>) => void;
+  /** 关闭工作区某个 tab；关的是激活页时激活邻位（右侧优先，其次左侧）。 */
+  closeBench: (key: string) => void;
+  /** 切换工作区激活 tab。 */
+  setBenchActive: (key: string) => void;
+  /** 开 / 关产物选择浮层（产物清单不进工作区，只在这里选）。 */
+  setArtifactPicker: (open: boolean) => void;
   /** 更新内置浏览器地址。 */
   setBrowserUrl: (url: string) => void;
-  /** 在右栏「文件」Tab 里打开某个产物（已开则聚焦，未开则新增标签页）。 */
+  /** 在侧边工作区打开一个产物预览 —— 每个产物占一个独立 tab，已开则聚焦。 */
   openArtifact: (artifact: { id: string; name: string }) => void;
-  /** 关闭「文件」Tab 里的某个标签页（关闭的是激活页时激活邻位）。 */
+  /** 关闭某个产物的 tab（按产物 id）。 */
   closeArtifact: (id: string) => void;
-  /** 切换「文件」Tab 的激活标签页。 */
-  setArtifactActive: (id: string) => void;
   /** 切换主题：写入 localStorage + 立即生效（App 的 effect 负责落 DOM）。 */
   setTheme: (theme: Theme) => void;
   setDetailTab: (tab: string) => void;
@@ -253,7 +381,7 @@ export interface StoreApi {
   /** 只追加助手卡片（重试回填）：用户气泡已存在，任何 user 卡都被过滤掉。 */
   appendAssistantCards: (conversationId: string, cards: Message[]) => void;
   /** B18：发送消息后用服务端真实用量估算更新顶栏（contextUsed→k、costCny）。 */
-  applyUsage: (usage: { contextUsed?: number; costCny?: number }) => void;
+  applyUsage: (usage: { contextUsed?: number; contextBudget?: number; costCny?: number }) => void;
   addToast: (text: string) => void;
   setPalette: (open: boolean) => void;
   setHelp: (open: boolean) => void;
@@ -264,8 +392,8 @@ export interface StoreApi {
   setTermPreset: (command: string) => void;
   /** 数据浏览右键筛选 → SQL 查询页回填（消费方读后应清空）。 */
   setSqlPreset: (sql: string | null) => void;
-  /** ChatView 发起流式请求前注册 AbortController；stopGeneration 调用它真中断。 */
-  registerAbort: (controller: AbortController | null) => void;
+  /** 流式请求前注册 AbortController（按会话分桶）；stopGeneration 停的是**当前会话**那条流。 */
+  registerAbort: (controller: AbortController | null, conversationId?: string) => void;
   /** 打开源文件并跳到指定行；无路径的引用不走这里（UI 应禁用「打开」）。 */
   openSource: (path: string, line?: number) => void;
   /** CodeDetail 消费完待打开定位后调用，避免每次渲染重复跳转。 */
@@ -276,16 +404,37 @@ export interface StoreApi {
   setModel: (name: string) => void;
   /** 会话级模型切换：只影响该会话下一条消息，不改服务端全局模型配置。 */
   setConversationModel: (conversationId: string, model: string) => void;
+  /** 打开一条会话 tab 并激活（已打开则只激活，不重复添加）。 */
+  openSessionTab: (id: string, title: string) => void;
+  /** 关闭一条会话 tab；关的是激活页时激活邻位（右侧优先，其次左侧）。 */
+  closeSessionTab: (id: string) => void;
+  /** 会话 tab 重命名同步：改名后 tab 标题跟着变。 */
+  retitleSessionTab: (id: string, title: string) => void;
+  /** 按 tab 下标激活会话（⌘1..⌘9 用；越界忽略）。 */
+  activateSessionTabAt: (index: number) => void;
+  /** 写某会话的流式文本；传 null 表示该会话本轮结束。 */
+  setStream: (conversationId: string, text: string | null) => void;
+  /** 打开 / 关闭协作流视图（跟随当前会话）。 */
+  toggleCollab: (open?: boolean) => void;
+  /**
+   * 拉一次待人清单。
+   *
+   * 对外暴露是因为「刚答完一个问题」这类时刻必须立刻复核，不能等下一轮轮询：
+   * 你答完还看着那个红点，会以为没提交成功。
+   */
+  refreshWaiting: () => Promise<void>;
   setApiMode: (mode: 'live' | 'mock') => void;
   stopGeneration: () => void;
   hydrateFromRest: (payload: {
     projects?: Project[];
-    statusBar?: { model?: string; contextUsed?: number; costCny?: number; state?: string };
+    statusBar?: { model?: string; contextUsed?: number; contextBudget?: number; costCny?: number; state?: string };
     readOnlyMode?: boolean;
     threads?: Record<string, Message[]>;
     /** 服务端判定的当前会话：切项目后前端不能再假设是 c-gmv。 */
     activeConversationId?: string;
     activeConversationTitle?: string;
+    /** 服务端判定的当前工作区：资产级请求靠它注入 workspaceId。 */
+    workspaceId?: string;
   }) => void;
 }
 
@@ -304,7 +453,9 @@ const INITIAL_STATE: AppState = {
   readOnly: true,
   theme: readStoredTheme(),
   leftCollapsed: false,
-  rightCollapsed: false,
+  /* 工作区默认**收起**：不占版面、不预置任何 tab。
+   * 它是「点了才来」的展示区 —— 用户没点入口之前，右侧留给会话本身。 */
+  rightCollapsed: true,
   workspaceId: 'w-ops',
   activeConversationId: __PACKAGED__ ? '' : 'c-gmv',
   activeAssetId: 'a-order-service',
@@ -313,16 +464,17 @@ const INITIAL_STATE: AppState = {
   assetChat: null,
   assetChatCollapsed: readStoredAssetChatCollapsed(),
   threads: __PACKAGED__ ? {} : MOCK_SNAPSHOT.INITIAL_THREADS,
-  hudPane: null,
-  benchTab: 'browser',
+  /* 不预置任何 tab：进来就是空的，等用户从右缘图标点开第一个。 */
+  benchTabs: [],
+  benchActive: '',
+  artifactPickerOpen: false,
   browserUrl: '',
-  artifactTabs: [],
-  artifactView: null,
   detailTab: 'main',
   configOpen: false,
   settingsSection: 'gen',
   orgSection: 'm',
   ctxTokens: 32,
+  ctxBudget: 128,
   cost: 0.42,
   statusText: '就绪',
   statusNote: '',
@@ -340,6 +492,15 @@ const INITIAL_STATE: AppState = {
   pendingSource: null,
   sqlPreset: null,
   conversationModels: readStoredConversationModels(),
+  /* tab 恢复交给 hydrateFromRest：初始只有「当前会话」这一条真数据，
+   * 直接灌 localStorage 里的旧 id 会出现「tab 指向一个服务端已删的会话」。 */
+  sessionTabs: [],
+  streams: {},
+  collabFor: null,
+  /* 待人清单从空开始：不知道就显示「没有」比显示一个假数字安全。
+   * 首次拉取在 Provider 的 effect 里，启动几百毫秒后就会有真值。 */
+  waiting: [],
+  waitingAt: '',
 };
 
 const StoreContext = createContext<StoreApi | null>(null);
@@ -362,11 +523,22 @@ export function useStore(): StoreApi {
 }
 
 export function StoreProvider({ children }: { children: React.ReactNode }): React.ReactElement {
-  const [state, setState] = useState<AppState>(INITIAL_STATE);
+  /* 初始状态里如果已经有一条当前会话（开发态 / 恢复态），就同步建出它的 tab。
+   * 不做这一步的话，启动到 bootstrap 返回之间会有几百毫秒「会话在、标签栏空」的错位，
+   * 看起来像是标签栏坏了而不是还没加载完。 */
+  const [state, setState] = useState<AppState>(() => {
+    const base: AppState = { ...INITIAL_STATE };
+    if (base.activeConversationId) {
+      base.sessionTabs = [{ id: base.activeConversationId, title: base.activeConversationTitle }];
+    }
+    return base;
+  });
   /* 回调里需要「当前」工作区，但 useCallback 不能依赖 state 否则每次渲染都换引用；
    * stateRef 让 newConversation 这类命令式动作读到最新值，而不是写死 'w-ops'。 */
   const stateRef = useRef<AppState>(state);
   stateRef.current = state;
+  /** 初始化时那一条 tab 的 id —— 它只是「先占个位」，bootstrap 回来后要被真实会话替换掉。 */
+  const seededTabId = useRef<string>(INITIAL_STATE.activeConversationId);
   const toastSeq = useRef<number>(0);
   const msgSeq = useRef<number>(0);
   const convSeq = useRef<number>(0);
@@ -399,53 +571,64 @@ export function StoreProvider({ children }: { children: React.ReactNode }): Reac
     }));
   }, []);
 
-  const setHudPane = useCallback((pane: HudPane) => patch({ hudPane: pane }), [patch]);
-  const setBenchTab = useCallback((tab: BenchTab) => patch({ benchTab: tab }), [patch]);
-  const setBrowserUrl = useCallback((url: string) => patch({ browserUrl: url }), [patch]);
-  /** 在右栏打开产物：切到「文件」Tab 并展开右栏 —— 产物不该只在气泡里看一眼。
-   * 多标签：已开则聚焦，未开则追加；上限 12 个，超出挤掉最旧的非激活页。 */
-  const openArtifact = useCallback((artifact: { id: string; name: string }) => {
+  /** 打开某类内容：已开则激活，未开则追加。同时展开工作区（点图标就是要看见它）。 */
+  const openBench = useCallback((kind: Exclude<BenchPaneKind, 'artifact'>) => {
+    setState((prev) => ({
+      ...prev,
+      benchTabs: pushBenchTab(prev.benchTabs, { key: kind, kind, title: BENCH_TITLES[kind] }),
+      benchActive: kind,
+      rightCollapsed: false,
+    }));
+  }, []);
+
+  /** 关闭 tab；关的是激活页时优先激活右侧邻居，否则左侧。
+   *  **关掉最后一个 tab 自动收起工作区** —— 空栏只是占版面，缩回去把宽度还给会话。 */
+  const closeBench = useCallback((key: string) => {
     setState((prev) => {
-      const tabs = prev.artifactTabs;
-      const exists = tabs.some((tab) => tab.id === artifact.id);
-      let nextTabs = tabs;
-      if (!exists) {
-        nextTabs = [...tabs, artifact];
-        if (nextTabs.length > 12) {
-          const drop = nextTabs.findIndex((tab) => tab.id !== artifact.id);
-          if (drop >= 0) nextTabs = nextTabs.filter((_, index) => index !== drop);
-        }
-      }
+      const index = prev.benchTabs.findIndex((tab) => tab.key === key);
+      if (index < 0) return prev;
+      const tabs = prev.benchTabs.filter((tab) => tab.key !== key);
+      /* 关的不是激活页：激活页保持不变。关的是激活页：落到邻居，全关完就没激活页。 */
+      const nextActive = prev.benchActive === key
+        ? (tabs[index] ?? tabs[index - 1] ?? null)?.key ?? ''
+        : prev.benchActive;
       return {
         ...prev,
-        benchTab: 'file',
-        rightCollapsed: false,
-        artifactTabs: nextTabs,
-        artifactView: artifact,
+        benchTabs: tabs,
+        benchActive: nextActive,
+        rightCollapsed: tabs.length === 0 ? true : prev.rightCollapsed,
       };
     });
   }, []);
 
-  /** 关闭标签页；关的是激活页时优先激活右侧邻居，否则左侧。 */
-  const closeArtifact = useCallback((id: string) => {
-    setState((prev) => {
-      const index = prev.artifactTabs.findIndex((tab) => tab.id === id);
-      if (index < 0) return prev;
-      const tabs = prev.artifactTabs.filter((tab) => tab.id !== id);
-      let active = prev.artifactView;
-      if (active?.id === id) {
-        active = tabs[index] ?? tabs[index - 1] ?? null;
-      }
-      return { ...prev, artifactTabs: tabs, artifactView: active };
-    });
+  const setBenchActive = useCallback((key: string) => {
+    setState((prev) => (
+      prev.benchTabs.some((tab) => tab.key === key)
+        ? { ...prev, benchActive: key, rightCollapsed: false }
+        : prev
+    ));
   }, []);
 
-  const setArtifactActive = useCallback((id: string) => {
-    setState((prev) => {
-      const tab = prev.artifactTabs.find((item) => item.id === id);
-      return tab ? { ...prev, artifactView: tab } : prev;
-    });
+  const setBrowserUrl = useCallback((url: string) => patch({ browserUrl: url }), [patch]);
+  const setArtifactPicker = useCallback((open: boolean) => patch({ artifactPickerOpen: open }), [patch]);
+  /** 打开产物预览：每个产物一个独立 tab（key 带 id，同名不同 id 也是两个 tab）。
+   *  选完即收浮层 —— 浮层只负责「选哪个」，内容归工作区。 */
+  const openArtifact = useCallback((artifact: { id: string; name: string }) => {
+    const key = `artifact:${artifact.id}`;
+    setState((prev) => ({
+      ...prev,
+      benchTabs: pushBenchTab(prev.benchTabs, {
+        key, kind: 'artifact', title: artifact.name, artifactId: artifact.id,
+      }),
+      benchActive: key,
+      rightCollapsed: false,
+      artifactPickerOpen: false,
+    }));
   }, []);
+
+  const closeArtifact = useCallback((id: string) => {
+    closeBench(`artifact:${id}`);
+  }, [closeBench]);
   const setTheme = useCallback((theme: Theme) => {
     try {
       localStorage.setItem(THEME_KEY, theme);
@@ -521,6 +704,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }): Reac
   const setWorkspace = useCallback(
     (id: string) => {
       let target: ConvItem | undefined;
+      /* 先同步 api 层的工作区：资产级请求靠这个值注入 workspaceId，
+       * 顺序上必须早于下面任何一次资产请求发出。 */
+      setCurrentWorkspaceId(id);
       setState((prev) => {
         const project = prev.projects.find((p) => p.id === id);
         /* 取该项目下第一个非空文件夹里的会话；全空时再看散装会话。 */
@@ -554,41 +740,202 @@ export function StoreProvider({ children }: { children: React.ReactNode }): Reac
   /* B20：切换会话 + 真历史懒加载 —— 本地无线索时拉服务端消息卡；
    * 已有本地会话（欢迎语/进行中消息）不覆盖；已切走不注入。 */
   const setConversation = useCallback((id: string, title: string) => {
-    setState((prev) => ({
-      ...prev,
-      view: 'chat',
-      activeConversationId: id,
-      activeConversationTitle: title,
-      citation: null,
-      statusText: '就绪',
-    }));
+    setState((prev) => {
+      /* 从侧栏点会话有两种意图：切过去看，以及把它留在 tab 栏上。
+       * 两者同源，所以这里顺手把它加成 tab —— 否则「切过去的会话」和
+       * 「开着的 tab」会变成两套互相不知道对方存在的状态。 */
+      const sessionTabs = upsertSessionTab(prev.sessionTabs, id, title);
+      persistSessionTabs(sessionTabs);
+      return {
+        ...prev,
+        sessionTabs,
+        view: 'chat',
+        activeConversationId: id,
+        activeConversationTitle: title,
+        citation: null,
+        statusText: '就绪',
+      };
+    });
     loadThread(id);
   }, [loadThread]);
+
+  /* ---------- 多会话 tabs ---------- */
+
+  /** 打开 / 激活一条会话 tab；已打开就只激活，不重复添加。 */
+  const openSessionTab = useCallback((id: string, title: string) => {
+    if (!id) return;
+    setState((prev) => {
+      const sessionTabs = upsertSessionTab(prev.sessionTabs, id, title);
+      persistSessionTabs(sessionTabs);
+      return {
+        ...prev,
+        sessionTabs,
+        view: 'chat',
+        activeConversationId: id,
+        activeConversationTitle: title || prev.activeConversationTitle,
+        citation: null,
+      };
+    });
+    loadThread(id);
+  }, [loadThread]);
+
+  /**
+   * 关闭 tab —— **关 tab 不等于删会话**：会话仍在侧栏，随时能再打开。
+   * 关的是激活页时，优先激活右邻，没有右邻再取左邻；
+   * 全关完则 activeConversationId 置空，主区域显式提示「从左侧选一条会话」，
+   * 而不是偷偷替你切到另一条会话（那样用户会以为自己关错了）。
+   */
+  const closeSessionTab = useCallback((id: string) => {
+    setState((prev) => {
+      const index = prev.sessionTabs.findIndex((tab) => tab.id === id);
+      if (index < 0) return prev;
+      const sessionTabs = prev.sessionTabs.filter((tab) => tab.id !== id);
+      const wasActive = prev.activeConversationId === id;
+      const nextActive = wasActive
+        ? sessionTabs[Math.min(index, sessionTabs.length - 1)]?.id ?? ''
+        : prev.activeConversationId;
+      const nextTitle = wasActive
+        ? sessionTabs.find((tab) => tab.id === nextActive)?.title ?? ''
+        : prev.activeConversationTitle;
+      const streams = { ...prev.streams };
+      delete streams[id];
+      persistSessionTabs(sessionTabs);
+      return {
+        ...prev,
+        sessionTabs,
+        streams,
+        activeConversationId: nextActive,
+        activeConversationTitle: nextTitle,
+        collabFor: prev.collabFor === id ? null : prev.collabFor,
+      };
+    });
+  }, []);
+
+  /** 会话改名同步到 tab 标题（否则 tab 上还挂着旧名字）。 */
+  const retitleSessionTab = useCallback((id: string, title: string) => {
+    setState((prev) => {
+      if (!prev.sessionTabs.some((tab) => tab.id === id)) return prev;
+      const sessionTabs = prev.sessionTabs.map((tab) => (tab.id === id ? { ...tab, title } : tab));
+      persistSessionTabs(sessionTabs);
+      return { ...prev, sessionTabs };
+    });
+  }, []);
+
+  /** ⌘1..⌘9：按位置激活 tab。 */
+  const activateSessionTabAt = useCallback((index: number) => {
+    setState((prev) => {
+      const tab = prev.sessionTabs[index];
+      if (!tab) return prev;
+      return {
+        ...prev,
+        view: 'chat',
+        activeConversationId: tab.id,
+        activeConversationTitle: tab.title,
+        citation: null,
+      };
+    });
+  }, []);
+
+  /** 流式文本按会话存：两个会话可以同时在生成，各自画各自的。 */
+  const setStream = useCallback((conversationId: string, text: string | null) => {
+    if (!conversationId) return;
+    setState((prev) => {
+      const streams = { ...prev.streams };
+      if (text === null) delete streams[conversationId];
+      else streams[conversationId] = text;
+      return { ...prev, streams };
+    });
+  }, []);
+
+  /** 协作流视图：跟随当前会话开 / 关。 */
+  const toggleCollab = useCallback((open?: boolean) => {
+    setState((prev) => {
+      const next = open ?? prev.collabFor !== prev.activeConversationId;
+      return { ...prev, collabFor: next ? prev.activeConversationId : null };
+    });
+  }, []);
+
+  /* 待人探针：全局唯一一处拉取。
+   *
+   * 为什么 10 秒而不是侧栏原来那 30 秒：这张清单代表「Agent 已经停下来等你」，
+   * 是阻塞态。半分钟才亮一次的红点，会让人先怀疑界面坏了，再怀疑任务死了。
+   * 也不做 1 秒：待人状态的变化频率取决于人自己，拉太勤只是白耗。
+   *
+   * 失败保留上一次结果 —— 网络抖一下就把红点清掉，比不显示更危险。 */
+  const refreshWaiting = useCallback(async () => {
+    try {
+      const envelope = await restApi.getWaitingTickets(20);
+      if (!envelope.ok) return;
+      setState((prev) => ({
+        ...prev,
+        waiting: envelope.data.items ?? [],
+        waitingAt: new Date().toISOString(),
+      }));
+    } catch {
+      /* 网络异常：保留上一份快照，等下一轮。 */
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshWaiting();
+    const timer = window.setInterval(() => { void refreshWaiting(); }, 10000);
+    /* 切回窗口立刻复核一次：人离开过一阵再回来，第一眼看到的必须是最新状态。 */
+    const onFocus = (): void => { void refreshWaiting(); };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [refreshWaiting]);
+
+  /* 把待人状态同步到桌面壳：窗口标题 `(4) DevWork`、任务栏/Dock 徽标、托盘提示。
+   *
+   * 为什么必须做这一层：窗口最小化、被别的应用盖住、收进托盘时，界面里画的
+   * 红点一个都看不见 —— 而「Agent 停下来等你」正是最该被余光捕捉到的状态。
+   *
+   * 只在数字或等级真的变了才推：轮询每 10 秒跑一次，但一条没变的状态
+   * 反复穿过 IPC 去重画任务栏图标，纯属白耗。 */
+  const attentionRef = useRef('');
+  useEffect(() => {
+    const count = state.waiting.length;
+    const level = waitingLevel(state.waiting);
+    const key = `${count}:${level}`;
+    if (attentionRef.current === key) return;
+    attentionRef.current = key;
+    /* 吞掉异常：外壳没注册这个通道（旧版壳 / Web 模式）时，
+     * 任务栏没画上不该在控制台留一条未处理的 rejection。 */
+    void window.desktop?.setAttention?.({ count, level })?.catch(() => undefined);
+  }, [state.waiting]);
 
   const newConversation = useCallback(() => {
     convSeq.current += 1;
     const seq = convSeq.current;
     const localId = `c-new-${seq}`;
     const title = `新会话 ${seq}`;
-    setState((prev) => ({
-      ...prev,
-      view: 'chat',
-      extraConversations: [...prev.extraConversations, { id: localId, title }],
-      activeConversationId: localId,
-      activeConversationTitle: title,
-      threads: {
-        ...prev.threads,
-        [localId]: [
-          {
-            id: `m-${localId}`,
-            kind: 'text' as const,
-            text: '开始第一次对话。可以试试：查一下订单库最近 1 小时的慢查询 / 看一下 order-service 的重试逻辑 / 生成一份季度复盘。',
-          },
-        ],
-      },
-      citation: null,
-      statusText: '就绪',
-    }));
+    setState((prev) => {
+      const sessionTabs = upsertSessionTab(prev.sessionTabs, localId, title);
+      persistSessionTabs(sessionTabs);
+      return {
+        ...prev,
+        view: 'chat',
+        sessionTabs,
+        extraConversations: [...prev.extraConversations, { id: localId, title }],
+        activeConversationId: localId,
+        activeConversationTitle: title,
+        threads: {
+          ...prev.threads,
+          [localId]: [
+            {
+              id: `m-${localId}`,
+              kind: 'text' as const,
+              text: '开始第一次对话。可以试试：查一下订单库最近 1 小时的慢查询 / 看一下 order-service 的重试逻辑 / 生成一份季度复盘。',
+            },
+          ],
+        },
+        citation: null,
+        statusText: '就绪',
+      };
+    });
     /* B20：会话真持久化 —— 服务端创建成功后把本地临时 ID 换成真实 ID，
      * 之后发消息/历史/用量都落到同一个服务端会话。离线时保留本地 ID（mock 兜底）。 */
     void restApi
@@ -601,10 +948,22 @@ export function StoreProvider({ children }: { children: React.ReactNode }): Reac
           const thread = threads[localId];
           delete threads[localId];
           if (thread) threads[realId] = thread;
+          /* tab / 草稿 / 流式文本都挂在本地临时 id 上，换真 id 时要一起搬，
+           * 否则这条会话会「tab 还在、草稿没了」，看起来像丢字。 */
+          const sessionTabs = prev.sessionTabs.map((tab) => (tab.id === localId ? { ...tab, id: realId } : tab));
+          persistSessionTabs(sessionTabs);
+          const streams = { ...prev.streams };
+          if (localId in streams) {
+            streams[realId] = streams[localId];
+            delete streams[localId];
+          }
           return {
             ...prev,
+            sessionTabs,
+            streams,
             extraConversations: prev.extraConversations.map((c) => (c.id === localId ? { ...c, id: realId } : c)),
             activeConversationId: prev.activeConversationId === localId ? realId : prev.activeConversationId,
+            collabFor: prev.collabFor === localId ? realId : prev.collabFor,
             threads,
           };
         });
@@ -620,11 +979,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }): Reac
       addToast('名称不能为空');
       return;
     }
-    setState((prev) => ({
-      ...prev,
-      activeConversationTitle: prev.activeConversationId === id ? trimmed : prev.activeConversationTitle,
-      extraConversations: prev.extraConversations.map((c) => (c.id === id ? { ...c, title: trimmed } : c)),
-    }));
+    setState((prev) => {
+      const sessionTabs = prev.sessionTabs.map((tab) => (tab.id === id ? { ...tab, title: trimmed } : tab));
+      if (sessionTabs.some((tab) => tab.id === id)) persistSessionTabs(sessionTabs);
+      return {
+        ...prev,
+        sessionTabs,
+        activeConversationTitle: prev.activeConversationId === id ? trimmed : prev.activeConversationTitle,
+        extraConversations: prev.extraConversations.map((c) => (c.id === id ? { ...c, title: trimmed } : c)),
+      };
+    });
     void restApi
       .updateConversation(id, { title: trimmed })
       .then((envelope) => {
@@ -639,13 +1003,24 @@ export function StoreProvider({ children }: { children: React.ReactNode }): Reac
       setState((prev) => {
         const threads = { ...prev.threads };
         delete threads[id];
+        const streams = { ...prev.streams };
+        delete streams[id];
+        const index = prev.sessionTabs.findIndex((tab) => tab.id === id);
+        const sessionTabs = prev.sessionTabs.filter((tab) => tab.id !== id);
+        if (index >= 0) persistSessionTabs(sessionTabs);
         const wasActive = prev.activeConversationId === id;
+        /* 删掉的正好是激活 tab：优先接右邻，没有就接左邻；一个都不剩就清空 active，
+         * 主区域会提示「从左侧选一条会话」—— 不再硬塞一个 'c-gmv' 的假回落。 */
+        const fallback = wasActive ? sessionTabs[Math.min(index < 0 ? 0 : index, sessionTabs.length - 1)] : undefined;
         return {
           ...prev,
           threads,
+          streams,
+          sessionTabs,
           extraConversations: prev.extraConversations.filter((c) => c.id !== id),
-          activeConversationId: wasActive ? 'c-gmv' : prev.activeConversationId,
-          activeConversationTitle: wasActive ? 'GMV 归因' : prev.activeConversationTitle,
+          activeConversationId: wasActive ? fallback?.id ?? '' : prev.activeConversationId,
+          activeConversationTitle: wasActive ? fallback?.title ?? '' : prev.activeConversationTitle,
+          collabFor: prev.collabFor === id ? null : prev.collabFor,
         };
       });
       void restApi
@@ -801,7 +1176,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }): Reac
       const mock = prev.apiMode === 'mock';
       return {
         ...prev,
-        threads: { ...prev.threads, [target]: [...current, ...reply] },
+        threads: { ...prev.threads, [target]: mergeThread(current, reply) },
         ctxTokens: mock ? Math.min(200, prev.ctxTokens + 1) : prev.ctxTokens,
         cost: mock ? Number((prev.cost + 0.03).toFixed(2)) : prev.cost,
         statusText: '已响应 · 0.6s',
@@ -826,7 +1201,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }): Reac
     if (reply.length === 0) return;
     setState((prev) => {
       const current = prev.threads[conversationId] ?? [];
-      return { ...prev, threads: { ...prev.threads, [conversationId]: [...current, ...reply] } };
+      return { ...prev, threads: { ...prev.threads, [conversationId]: mergeThread(current, reply) } };
     });
   }, []);
 
@@ -853,21 +1228,34 @@ export function StoreProvider({ children }: { children: React.ReactNode }): Reac
     setState((prev) => ({ ...prev, sqlPreset: sql }));
   }, []);
 
-  /** 流式请求的中止控制器：ChatView 每次发送前注册，「停止生成」据此真中断 SSE。 */
-  const abortRef = useRef<AbortController | null>(null);
-  const registerAbort = useCallback((controller: AbortController | null) => {
-    abortRef.current = controller;
+  /**
+   * 流式请求的中止控制器 —— **按会话分桶**。
+   *
+   * 多 tab 之后一个 ref 不够用了：A 会话在生成、切到 B 会话按 Esc，
+   * 单个 ref 会把 A 的流停掉，而 B 毫发无伤 —— 用户看到的是「按了没反应」。
+   * 分桶后「停止生成」只停当前激活会话那条流，其余会话继续跑。
+   */
+  const abortRef = useRef<Record<string, AbortController>>({});
+  const registerAbort = useCallback((controller: AbortController | null, conversationId?: string) => {
+    const id = conversationId ?? stateRef.current.activeConversationId;
+    if (!id) return;
+    if (controller) abortRef.current[id] = controller;
+    else delete abortRef.current[id];
   }, []);
 
-  /** 停止生成：真中断当前 SSE 流（⌘. / Esc / 命令面板同一入口）。
+  /** 停止生成：真中断**当前会话**的 SSE 流（⌘. / Esc / 命令面板同一入口）。
    *  没有进行中的流时如实说明，不再假装"已停止"。 */
   const stopGeneration = useCallback(() => {
-    const controller = abortRef.current;
-    if (controller) {
+    const id = stateRef.current.activeConversationId;
+    const controller = id ? abortRef.current[id] : undefined;
+    if (id && controller) {
       controller.abort();
-      abortRef.current = null;
+      delete abortRef.current[id];
       setState((prev) => ({ ...prev, statusText: '已停止生成' }));
       addToast('已停止生成（流式请求已中断）');
+    } else if (Object.keys(abortRef.current).length > 0) {
+      /* 当前会话没在生成，但别的 tab 还在跑：说清楚，别让人以为按坏了。 */
+      addToast('当前会话没有进行中的生成（其它标签页仍在运行，切过去再停）');
     } else {
       addToast('当前没有进行中的生成任务');
     }
@@ -995,42 +1383,77 @@ export function StoreProvider({ children }: { children: React.ReactNode }): Reac
   const hydrateFromRest = useCallback(
     (payload: {
       projects?: Project[];
-      statusBar?: { model?: string; contextUsed?: number; costCny?: number; state?: string };
+      statusBar?: { model?: string; contextUsed?: number; contextBudget?: number; costCny?: number; state?: string };
       readOnlyMode?: boolean;
       threads?: Record<string, Message[]>;
       activeConversationId?: string;
       activeConversationTitle?: string;
+      workspaceId?: string;
     }) => {
-      setState((prev) => ({
-        ...prev,
-        activeConversationId: payload.activeConversationId ?? prev.activeConversationId,
-        activeConversationTitle: payload.activeConversationTitle ?? prev.activeConversationTitle,
-        projects: payload.projects && payload.projects.length > 0 ? payload.projects : prev.projects,
-        threads:
-          payload.threads && Object.keys(payload.threads).length > 0
-            ? { ...prev.threads, ...payload.threads }
-            : prev.threads,
-        readOnly: typeof payload.readOnlyMode === 'boolean' ? payload.readOnlyMode : prev.readOnly,
-        model: payload.statusBar?.model ?? prev.model,
-        cost: typeof payload.statusBar?.costCny === 'number' ? payload.statusBar.costCny : prev.cost,
-        ctxTokens:
-          typeof payload.statusBar?.contextUsed === 'number'
-            ? Math.round(payload.statusBar.contextUsed / 1024)
-            : prev.ctxTokens,
-        statusText: payload.statusBar?.state ?? prev.statusText,
-      }));
+      /* 服务端给的当前工作区是权威值：api 层注入 workspaceId 依赖它，
+       * 必须与 state.workspaceId 一起落，否则两侧会指向不同工作区。 */
+      if (payload.workspaceId) setCurrentWorkspaceId(payload.workspaceId);
+      setState((prev) => {
+        const nextActive = payload.activeConversationId ?? prev.activeConversationId;
+        const nextTitle = payload.activeConversationTitle ?? prev.activeConversationTitle;
+        /* tab 恢复：localStorage 里存的是「上次开着哪几个」，
+         * 但**当前会话永远以服务端为准** —— 存过的 tab 可能指向已删会话，
+         * 盲信它会出现「一启动就有个空 tab」。 */
+        const onlySeeded =
+          prev.sessionTabs.length === 1 && prev.sessionTabs[0].id === seededTabId.current;
+        let sessionTabs = onlySeeded
+          ? readStoredSessionTabs()
+          : prev.sessionTabs.length > 0
+            ? prev.sessionTabs
+            : readStoredSessionTabs();
+        /* 初始化那条只是占位（开发态还会是演示会话 c-gmv）：
+         * 真实会话一到就必须顶掉它，否则标签栏会同时挂着「演示会话」和「真实会话」两条，
+         * 而点前者是一条永远拉不到消息的空会话。 */
+        if (nextActive) sessionTabs = upsertSessionTab(sessionTabs, nextActive, nextTitle);
+        if (sessionTabs.length > 0) persistSessionTabs(sessionTabs);
+        return {
+          ...prev,
+          sessionTabs,
+          workspaceId: payload.workspaceId ?? prev.workspaceId,
+          activeConversationId: nextActive,
+          activeConversationTitle: nextTitle,
+          projects: payload.projects && payload.projects.length > 0 ? payload.projects : prev.projects,
+          threads:
+            payload.threads && Object.keys(payload.threads).length > 0
+              ? { ...prev.threads, ...payload.threads }
+              : prev.threads,
+          readOnly: typeof payload.readOnlyMode === 'boolean' ? payload.readOnlyMode : prev.readOnly,
+          model: payload.statusBar?.model ?? prev.model,
+          cost: typeof payload.statusBar?.costCny === 'number' ? payload.statusBar.costCny : prev.cost,
+          ctxTokens:
+            typeof payload.statusBar?.contextUsed === 'number'
+              ? Math.round(payload.statusBar.contextUsed / 1024)
+              : prev.ctxTokens,
+          /* 预算按 1000 折算：128000 tokens 应该显示 128k，而不是 125k。 */
+          ctxBudget:
+            typeof payload.statusBar?.contextBudget === 'number'
+              ? Math.max(1, Math.round(payload.statusBar.contextBudget / 1000))
+              : prev.ctxBudget,
+          statusText: payload.statusBar?.state ?? prev.statusText,
+        };
+      });
     },
     [],
   );
 
-  /** B18：上下文用量真值 —— 服务端按消息体量估算，不再 +1k/+0.03 模拟。 */
-  const applyUsage = useCallback((usage: { contextUsed?: number; costCny?: number }) => {
+  /** B18：上下文用量真值 —— 服务端按上下文预算口径计算，不再 +1k/+0.03 模拟。
+   *  budget 一起回写：预算跟着模型走，写死 200k 会让 32k 模型一直显示"还有九成余量"。 */
+  const applyUsage = useCallback((usage: { contextUsed?: number; contextBudget?: number; costCny?: number }) => {
     setState((prev) => ({
       ...prev,
       ctxTokens:
         typeof usage.contextUsed === 'number'
           ? Math.max(1, Math.round(usage.contextUsed / 1024))
           : prev.ctxTokens,
+      ctxBudget:
+        typeof usage.contextBudget === 'number' && usage.contextBudget > 0
+          ? Math.max(1, Math.round(usage.contextBudget / 1000))
+          : prev.ctxBudget,
       cost: typeof usage.costCny === 'number' ? Number(usage.costCny.toFixed(2)) : prev.cost,
     }));
   }, []);
@@ -1039,12 +1462,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }): Reac
     () => ({
       state,
       navigate,
-      setHudPane,
-      setBenchTab,
+      openBench,
+      closeBench,
+      setBenchActive,
+      setArtifactPicker,
       setBrowserUrl,
       openArtifact,
       closeArtifact,
-      setArtifactActive,
       setTheme,
       setDetailTab,
       setConfigOpen,
@@ -1087,6 +1511,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }): Reac
       setStatus,
       setModel,
       setConversationModel,
+      openSessionTab,
+      closeSessionTab,
+      retitleSessionTab,
+      activateSessionTabAt,
+      setStream,
+      toggleCollab,
+      refreshWaiting,
       setApiMode,
       stopGeneration,
       hydrateFromRest,
@@ -1094,12 +1525,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }): Reac
     [
       state,
       navigate,
-      setHudPane,
-      setBenchTab,
+      openBench,
+      closeBench,
+      setBenchActive,
+      setArtifactPicker,
       setBrowserUrl,
       openArtifact,
       closeArtifact,
-      setArtifactActive,
       setTheme,
       setDetailTab,
       setConfigOpen,
@@ -1142,6 +1574,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }): Reac
       setStatus,
       setModel,
       setConversationModel,
+      openSessionTab,
+      closeSessionTab,
+      retitleSessionTab,
+      activateSessionTabAt,
+      setStream,
+      toggleCollab,
+      refreshWaiting,
       setApiMode,
       stopGeneration,
       hydrateFromRest,

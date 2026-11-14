@@ -30,7 +30,20 @@ const VITE_PORT = 5173;
  * 跑安装后的 exe 时是 false。这个判断不依赖 app 对象，
  * 因为 ELECTRON_RUN_AS_NODE 的重启分支里 app 根本不存在。
  */
-const IS_PACKAGED = process.defaultApp !== true;
+/**
+ * 打包态判定 —— 用 app.isPackaged，不用 process.defaultApp。
+ *
+ * process.defaultApp 只在 `electron .` 这种场景可靠；在某些打包产物上它判不出打包态，
+ * 一旦判错，应用会以为自己还在开发：去连 5173 的开发服务器、不 spawn 后端、也不写日志，
+ * 外部表现就是「窗口开着，但数据全空、后端端口没监听」。
+ * app.isPackaged 是 Electron 官方给打包态用的判定，打包后恒为 true。
+ *
+ * electronModule 在 ELECTRON_RUN_AS_NODE 下是字符串（只有路径），此时 app 不存在，
+ * 退回原判断 —— 那个分支紧接着就会重启自身进入 GUI 模式，不影响后续流程。
+ */
+const IS_PACKAGED = typeof electronModule === 'string'
+  ? process.defaultApp !== true
+  : electronModule.app.isPackaged;
 const APP_ROOT = path.resolve(__dirname, '..');
 /** 打包态的资源根目录（resources/），开发态等于仓库根。 */
 const RES_ROOT = IS_PACKAGED ? process.resourcesPath : APP_ROOT;
@@ -73,23 +86,28 @@ const BUNDLED_NODE = path.join(RES_ROOT, 'runtime', 'node.exe');
  */
 function resolveUserDataDir() {
   const portableDir = process.env.PORTABLE_EXECUTABLE_DIR;
-  /* portable 模式下这个变量指向 exe 真实所在目录；非 portable（目录态）用 exe 自身目录。 */
-  const baseDir = portableDir && fs.existsSync(portableDir)
-    ? portableDir
-    : path.dirname(process.execPath);
-  const preferred = path.join(baseDir, 'DevWorkData');
-  try {
-    fs.mkdirSync(preferred, { recursive: true });
-    /* 真正写一个探针文件：mkdir 成功不代表有写权限（Program Files 会失败在写文件上）。 */
-    const probe = path.join(preferred, '.write-probe');
-    fs.writeFileSync(probe, 'ok');
-    fs.unlinkSync(probe);
-    return preferred;
-  } catch {
-    const fallback = path.join(process.env.LOCALAPPDATA || process.env.APPDATA || baseDir, 'DevWork');
-    fs.mkdirSync(fallback, { recursive: true });
-    return fallback;
+
+  /* portable：绿色软件习惯，数据跟 exe 同目录，拷走 exe 就拷走数据。 */
+  if (portableDir && fs.existsSync(portableDir)) {
+    const preferred = path.join(portableDir, 'DevWorkData');
+    try {
+      fs.mkdirSync(preferred, { recursive: true });
+      /* 真正写一个探针文件：mkdir 成功不代表有写权限。 */
+      const probe = path.join(preferred, '.write-probe');
+      fs.writeFileSync(probe, 'ok');
+      fs.unlinkSync(probe);
+      return preferred;
+    } catch {
+      /* portable 目录不可写 → 落到下面的系统用户目录 */
+    }
   }
+
+  /* 安装版（NSIS）：走 Electron 标准 userData（%APPDATA%\DevWork）。
+   * 这里**不能**再退回 exe 所在目录 —— 安装版 exe 在 Program Files，
+   * 把库和沙箱写进安装目录既没写权限，卸载时还会留下删不掉的用户数据。 */
+  const userData = app.getPath('userData');
+  fs.mkdirSync(userData, { recursive: true });
+  return userData;
 }
 
 /**
@@ -113,6 +131,61 @@ if (typeof electronModule === 'string') {
 }
 
 const { app, BrowserWindow, Menu, Tray, nativeImage, dialog, ipcMain, shell, session } = electronModule;
+/* 待人徽标的纯计算部分（画点阵、算标题）单独成模块：能直接跑断言，不用起整个壳。 */
+const attention = require('./attention.cjs');
+
+/** 窗口基准标题。任务栏显示的 `(4) DevWork` 由 attention.windowTitle 拼。 */
+const BASE_TITLE = 'DevWork';
+
+/**
+ * 打包态把主进程输出落到 <userData>/logs/desktop.log。
+ *
+ * GUI 程序没有控制台，console 输出直接进黑洞 —— 出问题时「双击没反应」
+ * 就只剩猜。官方桌面端同样把启动日志存到 user-data/logs/desktop.log，
+ * 这里对齐这个约定。开发态保持原样，不制造额外文件。
+ */
+function initFileLogging() {
+  if (!IS_PACKAGED) return;
+
+  /* 落点优先级：userData/logs（官方约定）→ %TEMP%（一定可写，兜底）。
+   * 只留一个落点的话，恰恰在「userData 取不到」这种最需要日志的时候没日志。 */
+  const candidates = [];
+  try {
+    candidates.push(path.join(resolveUserDataDir(), 'logs', 'desktop.log'));
+  } catch { /* userData 不可用，走 TEMP */ }
+  const temp = process.env.TEMP || process.env.TMP;
+  if (temp) candidates.push(path.join(temp, 'devwork-desktop.log'));
+
+  const format = (value) => {
+    if (typeof value === 'string') return value;
+    if (value instanceof Error) return `${value.name}: ${value.message}`;
+    try { return JSON.stringify(value); } catch { return String(value); }
+  };
+
+  for (const file of candidates) {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const stream = fs.createWriteStream(file, { flags: 'a' });
+      const tee = (level, original) => (...args) => {
+        try {
+          stream.write(`[${new Date().toISOString()}] ${level} ${args.map(format).join(' ')}\n`);
+        } catch { /* 日志写入失败不能影响主流程 */ }
+        original(...args);
+      };
+      console.log = tee('INFO', console.log.bind(console));
+      console.warn = tee('WARN', console.warn.bind(console));
+      console.error = tee('ERROR', console.error.bind(console));
+      console.log(`[DevWork] 日志已落盘：${file}`);
+      return;
+    } catch {
+      /* 换下一个落点 */
+    }
+  }
+  /* 两处都写不了：退回纯控制台，不阻塞启动。 */
+  console.warn('[DevWork] 无法写入日志文件（userData 与 TEMP 均失败）');
+}
+
+initFileLogging();
 
 let mainWindow = null;
 let backendChild = null;
@@ -198,7 +271,8 @@ function ensureTray() {
     { label: '退出 DevWork', click: () => shutdown() },
   ]);
   tray = new Tray(nativeImage.createFromBuffer(Buffer.from(TRAY_ICON_BASE64, 'base64')));
-  tray.setToolTip('DevWork · 已最小化到托盘，后台任务继续运行');
+  /* 托盘提示带上待人数量：窗口收起来之后，这是唯一还看得见的一行字。 */
+  tray.setToolTip(attentionCtl.trayTip());
   tray.setContextMenu(trayMenu);
   tray.on('double-click', () => focusAnyWindow());
   tray.on('click', () => {
@@ -212,6 +286,28 @@ function destroyTray() {
   if (!tray) return;
   try { tray.destroy(); } catch { /* already gone */ }
   tray = null;
+}
+
+/**
+ * 待人状态落到「窗口之外」：标题、任务栏、Dock、托盘提示。
+ *
+ * 具体怎么画、该调哪几个原生接口，都在 desktop/attention.cjs ——
+ * 那边不依赖 Electron 生命周期，喂个假窗口就能断言。
+ * 这里只负责把「当前窗口」「当前托盘」接进去：两者都会被关掉重建，
+ * 所以必须是取的时候才拿，不能缓存句柄。
+ */
+const attentionCtl = attention.createAttentionController({
+  app,
+  nativeImage,
+  getWindow: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null),
+  getTray: () => tray,
+  platform: process.platform,
+  baseTitle: BASE_TITLE,
+});
+
+/** 渲染进程推来的待人状态 → 交给控制器落地。 */
+function applyAttention(payload) {
+  return attentionCtl.apply(payload);
 }
 
 function sleep(ms) {
@@ -589,7 +685,18 @@ function createMainWindow(options = {}) {
     webPreferences: webPreferences(),
   });
   const win = mainWindow;
-  win.once('ready-to-show', () => win.show());
+  /* 标题由主进程掌握（待人数量前缀），不让页面 document.title 覆盖。
+   * 这条应用是自绘标题栏，页面标题对用户不可见，唯一用途就是任务栏/Alt+Tab 文案。 */
+  win.on('page-title-updated', (event) => event.preventDefault());
+  win.once('ready-to-show', () => {
+    win.show();
+    /* 窗口可能晚于待人数据创建（重开窗口）：把最近一次状态补上。 */
+    applyAttention(attentionCtl.current());
+  });
+  /* 窗口拿到焦点 = 人已经看到了：停止闪烁，别继续催。 */
+  win.on('focus', () => {
+    if (!win.isDestroyed()) win.flashFrame(false);
+  });
   win.on('maximize', () => {
     if (!win.isDestroyed()) win.webContents.send('win:maximize-changed', true);
   });
@@ -647,6 +754,11 @@ function registerIpc() {
     return win ? win.isMaximized() : false;
   });
   ipcMain.handle('app:platform', () => process.platform);
+  /* 渲染进程每次待人清单变化推一次：{ count, level }。
+   * 主进程不再自己拉接口 —— 它拿不到登录态，也不该有两套口径。 */
+  ipcMain.handle('win:attention', (_event, payload) => {
+    return applyAttention(payload);
+  });
   ipcMain.handle('app:versions', () => ({
     electron: process.versions.electron,
     node: process.versions.node,
@@ -687,6 +799,90 @@ function registerIpc() {
   });
 }
 
+/**
+ * 自动更新（electron-updater · generic provider）。
+ *
+ * 只在**安装版**启用。portable 是单文件自解压到临时目录运行的，没有稳定安装位置，
+ * 更新器无处落盘 —— electron-updater 在 portable 下会直接报错。
+ * 官方桌面端同样不把 portable 当发布产物，这里保持一致。
+ *
+ * 流程对齐官方：后台检查 → 用户显式确认 → 下载 → 提示重启。
+ * 不做静默安装：这个应用常驻托盘、后台可能正在跑 Agent 任务，
+ * 静默重启会把用户手上的活儿直接打断。
+ */
+function initAutoUpdater() {
+  if (!IS_PACKAGED) return;
+  if (process.env.PORTABLE_EXECUTABLE_DIR) {
+    console.log('[DevWork] portable 模式，跳过自动更新');
+    return;
+  }
+
+  /* zip 分发没有安装器，electron-builder 不会生成 resources/app-update.yml。
+   * 缺这份配置时 autoUpdater 直接抛 ENOENT，每次启动都刷一条错误日志 ——
+   * 先确认配置存在，再决定要不要挂更新器。 */
+  if (!fs.existsSync(path.join(RES_ROOT, 'app-update.yml'))) {
+    console.log('[DevWork] 未生成更新配置（zip 分发），跳过自动更新');
+    return;
+  }
+
+  let autoUpdater;
+  try {
+    ({ autoUpdater } = require('electron-updater'));
+  } catch (error) {
+    console.warn('[DevWork] 更新器不可用：', error.message);
+    return;
+  }
+
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = true;
+  try { autoUpdater.channel = 'stable'; } catch { /* 旧版本无此属性 */ }
+
+  autoUpdater.on('error', (error) => {
+    /* 更新检查失败不该打扰用户：离线、更新源未部署都是正常情况。 */
+    console.warn('[DevWork] 更新检查失败：', error && error.message);
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    void dialog.showMessageBox({
+      type: 'info',
+      title: '发现新版本',
+      message: `DevWork ${info.version} 已发布`,
+      detail: '是否现在下载？下载完成后会提示重启。',
+      buttons: ['下载', '稍后'],
+      defaultId: 0,
+      cancelId: 1,
+    }).then(({ response }) => {
+      if (response === 0) {
+        void autoUpdater.downloadUpdate().catch((error) => {
+          console.warn('[DevWork] 更新下载失败：', error && error.message);
+        });
+      }
+    });
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    void dialog.showMessageBox({
+      type: 'info',
+      title: '更新已就绪',
+      message: `DevWork ${info.version} 已下载完成`,
+      detail: '重启后生效。',
+      buttons: ['立即重启', '稍后'],
+      defaultId: 0,
+      cancelId: 1,
+    }).then(({ response }) => {
+      if (response !== 0) return;
+      /* 重启安装前先收掉后端子进程，否则会留下抱 3001 端口的孤儿进程。 */
+      shuttingDown = true;
+      killBackend(() => autoUpdater.quitAndInstall(false, true));
+    });
+  });
+
+  /* 延迟检查：别和首屏加载、后端启动抢 IO。 */
+  setTimeout(() => {
+    void autoUpdater.checkForUpdates().catch(() => { /* 已在 error 事件里记录 */ });
+  }, 8000);
+}
+
 async function bootstrap() {
   registerIpc();
   if (process.platform === 'darwin') {
@@ -695,9 +891,19 @@ async function bootstrap() {
     Menu.setApplicationMenu(null);
   }
 
-  isDev = await probe(VITE_PORT, '/');
-
-  let healthy = await probe(API_PORT, '/api/health');
+  /* 打包态**不探测**开发服务器。
+   *
+   * 5173 / 3001 上很可能正跑着 `npm run dev`：一旦探测到，打包版会加载开发页面、
+   * 复用开发后端与开发库 —— 看起来"能跑"，实际跑的是另一份代码、另一份数据，
+   * 而且开发进程一退出，窗口就成了连不上后端的空壳。
+   * 单实例锁已经保证只有一个打包实例，所以打包态总是自己起后端。 */
+  let healthy = false;
+  if (IS_PACKAGED) {
+    isDev = false;
+  } else {
+    isDev = await probe(VITE_PORT, '/');
+    healthy = await probe(API_PORT, '/api/health');
+  }
 
   /* 非开发模式：认领桌面壳令牌，网络层自动给 3001 请求注入 X-DevWork-Token。
    * 渲染进程 fetch 走 session 网络栈，用户无感；开发模式不做门禁也无需令牌。 */
@@ -729,14 +935,46 @@ async function bootstrap() {
   console.log(`[DevWork] mainPid=${process.pid} · dev=${isDev} · window=main ${MAIN_SIZE.width}x${MAIN_SIZE.height} frameless`);
   if (!healthy) {
     void mainWindow.webContents.loadURL(
-      `data:text/html;charset=utf-8,${encodeURIComponent(errorPage('15 秒内未探测到 127.0.0.1:3001/api/health。'))}`,
+      `data:text/html;charset=utf-8,${encodeURIComponent(errorPage(
+        '15 秒内未探测到 127.0.0.1:3001/api/health。'
+        + '若本机正在运行 npm run dev，请先关闭 —— 开发服务器会占用 3001，'
+        + '打包版的后端就起不来。',
+      ))}`,
     );
   }
+
+  /* 窗口起来之后再挂更新器：安装版才生效，portable 自动跳过。 */
+  initAutoUpdater();
 }
 
-app.whenReady().then(bootstrap).catch((error) => {
-  console.error('[DevWork] 启动异常：', error);
+/**
+ * 单实例锁 —— 与官方桌面端一致，必须在窗口、后端、数据目录之前拿到。
+ *
+ * 为什么必要：这个应用常驻托盘、后台可能正在跑 Agent 任务，用户很容易再点一次图标。
+ * 没有锁就会出现第二个壳去抢 3001、抢同一份 SQLite、抢同一枚 shell-token。
+ * 抢不到锁的实例只把焦点请求交给第一个实例，然后自己退出。
+ */
+process.on('uncaughtException', (error) => {
+  console.error('[DevWork] 未捕获异常：', error);
 });
+
+if (!app.requestSingleInstanceLock()) {
+  console.log('[DevWork] 已有实例在运行（单实例锁未获取），本实例退出');
+  app.quit();
+} else {
+  app.on('before-quit', () => {
+    console.log('[DevWork] before-quit');
+  });
+
+  app.on('second-instance', () => {
+    /* 第二个实例被拉起：聚焦已有窗口（不在就重建），不碰后端与数据目录。 */
+    if (app.isReady()) focusAnyWindow();
+  });
+
+  app.whenReady().then(bootstrap).catch((error) => {
+    console.error('[DevWork] 启动异常：', error);
+  });
+}
 
 app.on('before-quit', (event) => {
   if (shuttingDown) return;

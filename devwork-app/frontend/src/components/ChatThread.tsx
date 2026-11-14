@@ -85,7 +85,8 @@ export default function ChatThread(props: ChatThreadProps): React.ReactElement {
     setModal,
     setTermPreset,
     setCitation,
-    setHudPane,
+    openBench,
+    setArtifactPicker,
     openArtifact,
     openSource,
   } = useStore();
@@ -391,6 +392,59 @@ export default function ChatThread(props: ChatThreadProps): React.ReactElement {
           </div>
         );
       }
+      /* 任务清单：长任务的执行进度就靠这张卡。同一张卡原位更新（id 不变），
+       * 所以长任务推进时用户看到的是一份清单在变，而不是一串历史清单。 */
+      case 'todo': {
+        const { progress, items } = message;
+        const allDone = progress.total > 0 && progress.done === progress.total;
+        return (
+          <div className={`todo${allDone ? ' alldone' : ''}`} key={message.id} data-todo-progress={progress.percent}>
+            <div className="th">
+              <span className="tt">{allDone ? '任务已完成' : '任务清单'}</span>
+              <span className="tp">{progress.done}/{progress.total}</span>
+              {progress.blocked > 0 ? <span className="tb warn">{progress.blocked} 项受阻</span> : null}
+              {message.degraded ? <span className="tb">演示轨迹</span> : null}
+              <div className="tbar" title={`完成度 ${progress.percent}%（由状态数推导，不是模型自报）`}>
+                <i style={{ width: `${progress.percent}%` }} />
+              </div>
+            </div>
+            <ul>
+              {items.map((item, index) => (
+                <li key={`${message.id}-${item.id}`} className={`ti ${item.status}`}>
+                  <span className="tic" aria-hidden>
+                    {item.status === 'done' ? '✓' : item.status === 'doing' ? '▸' : item.status === 'blocked' ? '!' : index + 1}
+                  </span>
+                  <span className="tit">{item.title}</span>
+                  {item.note ? <span className="tin">{item.note}</span> : null}
+                </li>
+              ))}
+            </ul>
+          </div>
+        );
+      }
+      /* 压缩摘要卡：上下文被折叠的证据。默认收起正文，点开能核对提炼得对不对；
+       * 必须明说「原始消息还在」—— 否则用户会以为历史被删了。 */
+      case 'summary': {
+        return (
+          <div className="ctxfold" key={message.id} data-source={message.source}>
+            <div className="cfh">
+              <span className="cft">已折叠早前 {message.messages} 条对话</span>
+              <span className="cfm">
+                {message.mode === 'auto' ? '自动压缩' : '手动压缩'} ·{' '}
+                {message.source === 'model'
+                  ? `模型提炼${message.model ? `（${message.model}）` : ''}`
+                  : '规则提炼（未接入模型）'}
+                {message.freedTokens > 0 ? ` · 省下约 ${message.freedTokens} tokens` : ''}
+              </span>
+            </div>
+            <details className="cfd">
+              <summary>查看摘要内容</summary>
+              <pre>{message.content}</pre>
+            </details>
+            <div className="cfn">原始消息仍完整保留在时间线里，只是不再整段发给模型。</div>
+          </div>
+        );
+      }
       case 'notice':
         return (
           <div className={`notice ${message.level}`} key={message.id} data-notice={message.level}>
@@ -627,18 +681,18 @@ export default function ChatThread(props: ChatThreadProps): React.ReactElement {
                     className="btn"
                     onClick={(event) => {
                       event.stopPropagation();
-                      /* 产物在右栏「文件」Tab 里打开并预览 —— 预览需要版面，气泡里放不下。 */
+                      /* 产物在工作区新开一个预览 tab —— 预览需要版面，塞在会话里看不了。 */
                       openArtifact({ id: message.name, name: message.name });
-                      addToast(`已在右栏打开 ${message.name}`);
+                      addToast(`已在工作区打开 ${message.name}`);
                     }}
                   >
-                    在侧边栏打开
+                    在新标签页打开
                   </button>
                   <button
                     className="btn"
                     onClick={(event) => {
                       event.stopPropagation();
-                      setHudPane('out');
+                      setArtifactPicker(true);
                     }}
                   >
                     看本次全部产物
@@ -728,8 +782,8 @@ export default function ChatThread(props: ChatThreadProps): React.ReactElement {
                 className="btn"
                 onClick={() => {
                   setCitation(null);
-                  setHudPane('ctx');
-                  addToast('已展开会话右侧「上下文」气泡');
+                  openBench('ctx');
+                  addToast('已在工作区打开「上下文」');
                 }}
               >
                 看全部
