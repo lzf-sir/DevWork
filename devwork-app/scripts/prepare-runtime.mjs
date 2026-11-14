@@ -10,7 +10,7 @@
  */
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { log, ok, preflight, title } from './lib/common.mjs';
+import { checkEnvDeps, log, ok, title } from './lib/common.mjs';
 import { stageRuntime } from './lib/stage-runtime.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -19,7 +19,7 @@ const force = new Set(process.argv.slice(2)).has('--force');
 title('准备内置运行时');
 
 try {
-  preflight(ROOT, { requireNode: 22, autoInstall: false });
+  checkEnvDeps(ROOT, { requireNode: 22, autoInstall: false });
   const { stageDir, cached } = stageRuntime(ROOT, { force });
   ok(`运行时已暂存 → ${path.relative(ROOT, stageDir)}${cached ? '（缓存）' : ''}`);
   log('  下一步：npm run smoke（用这份运行时验证真实启动页）');

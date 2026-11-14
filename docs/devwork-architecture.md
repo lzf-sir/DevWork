@@ -44,14 +44,49 @@ workspaces 换来的是结构正确感，付出的是打包链路持续维护成
 ```
 resources/
 ├── dist/            前端构建产物（electron-builder extraResources from: dist）
-├── server/          后端运行时暂存（package.mjs 把 backend/src 拷成 server/src）
+├── server/          后端运行时暂存（stage-runtime 把 backend/src 拷成 server/src）
+│   ├── package.json         { "type": "module" }  ← 后端 ESM 上下文
 │   ├── src/
-│   └── node_modules/ (express / cors / tsx / esbuild)
+│   └── node_modules/        express / cors / tsx / esbuild（tsx 加载后端源码用）
+├── shared/          契约层（stage-runtime 把仓库根 shared/ 拷过来）
+│   ├── package.json         { "type": "module" }  ← **缺了它 shared 会被当 CJS**
+│   └── contracts/
+├── node_modules/    **shared 侧的运行期依赖（只有 zod）** ← 见下，不能放 server 下
 └── runtime/node.exe  内置 Node 22（后端依赖 node:sqlite，Electron 33 自带 Node 20 不够）
 ```
 
 `desktop/main.cjs` 依赖这个布局（`SERVER_ROOT`、`SERVER_ENTRY`、`TSX_*`、`BUNDLED_NODE`）。
-**改源码目录名没问题，改 resources 下的名字要同时改 main.cjs + package.mjs + electron-builder.yml。**
+**改源码目录名没问题，改 resources 下的名字要同时改
+`main.cjs` + `scripts/lib/stage-runtime.mjs` + `scripts/package.mjs` 的产物自检 + `electron-builder.yml`。**
+
+### 2.1.1 为什么 `shared/` 需要自己那两样东西（v1.0 踩过的两个坑）
+
+后端以 `../../../shared/contracts` 引用契约层，所以 `shared/` 与 `server/` 必须同级。
+但**同级还不够** —— v1.0 打包后「仓库外双击起不来」，根因是两件互相独立的事：
+
+| # | 缺什么 | 后果 | 为什么仓库内不复现 |
+|---|---|---|---|
+| a | `resources/shared/package.json`（`type:"module"`） | 没有祖先 `package.json` → `shared/contracts/*.ts` 被按 **CJS** 解释 → ESM 具名导出探测失败 | 仓库内 `devwork-app/package.json` 的 `"type":"module"` 是 `shared/` 的祖先；打包后这个祖先消失 |
+| b | `resources/node_modules/zod` | zod 找不到 → `ERR_MODULE_NOT_FOUND` | 仓库内向上能命中 `devwork-app/node_modules/zod` |
+
+**为什么 zod 不能只放 `resources/server/node_modules`**：ESM 裸包解析从**import 语句所在文件**逐级向上找 `node_modules`。
+`resources/shared/contracts/index.ts` 的链是
+`shared/contracts/node_modules` → `shared/node_modules` → `resources/node_modules` → `resources/../…`，
+**`server/node_modules` 根本不在这条链上**。所以 shared 侧的依赖必须落在 `resources/node_modules`（或 `shared/node_modules`）。
+
+**落点取舍（刻意留痕，别"整理")**：本可以落 `resources/shared/node_modules` —— 那样连 `electron-builder.yml` 都不用改，
+因为 `from: build/pkg/shared → to: shared` 是递归拷贝。最终选 **resources 根**，理由是 server 侧将来若有"后端与契约共享的依赖"
+可以复用同一份，不必再往 `shared/` 里塞 node_modules；**代价是 `electron-builder.yml` 多一处
+`from: build/pkg/node_modules → to: node_modules` 需要与 `stage-runtime.mjs` 的暂存逻辑同步**。
+两种落点都能被解析，选根是权衡不是随手。**若要改落点，必须同时改五处**：
+`stage-runtime.mjs`（真正拷包的地方）、`electron-builder.yml`（`extraResources` 的 `from/to`）、
+`preflight-release.mjs` ④（静态断言校验的路径）、`package.mjs` 的产物自检（在 `win-unpacked/resources` 下再查一次）、
+`smoke-package.mjs`（前置检查 + 复制到 `os.tmpdir()` 的清单里都有 `pkg/node_modules` 这一件）。
+漏改前两处会**静默丢依赖**（包没进产物，但闸门是绿的）；漏改后三处会让闸门**指向旧路径**（红得没有意义，修的人会去动错误的目录）。
+
+**验证方式（唯一真闸门）**：产物必须在**「祖先既没有 `node_modules` 也没有 `package.json`」的目录**里启动一次
+（`stage-runtime.mjs` 与 `smoke-package.mjs` 都为此把 `build/pkg` 复制到 `os.tmpdir()` 再跑）。
+在 `devwork-app/` 下面任何位置启动都会向上命中仓库的 `package.json` 与 `node_modules`，**红不起来** —— 这两个坑都是这么漏掉的。
 
 ### 2.2 运行时数据只落在 `backend/.runtime/`
 
@@ -199,11 +234,12 @@ npm run test:tickets      # 只跑工单链路（授权 → 建单 → 派工 �
 | 6 | 往 `index.ts` 加路由 | 加到对应域模块，注意 `audit/export` 这类前缀顺序 |
 | 7 | 就地拼运行时路径 | 从 `config.ts` 的 `RUNTIME_DIR` / `DATA_DIR` 等常量取 |
 | 8 | 批量改路由用「下一个 `body(req)`」定位 | 必须按**路由块**（扫描到配平 `}));`），否则单行内联或同路径多方法会串块 |
-| 9 | 以为目录改名会破坏打包 | 打包契约是 `resources/{dist,server,runtime}`，与源码目录名无关；要改的是 main.cjs + package.mjs + builder.yml |
+| 9 | 以为目录改名会破坏打包 | 打包契约是 `resources/{dist,server,shared,node_modules,runtime}`（**五件**，见 §2.1），与源码目录名无关；要改的是 `main.cjs` + `stage-runtime.mjs` + `electron-builder.yml` |
 | 10 | 把清单工具的 action 命名成 `todo.write` | `isWriteAction()` 会判成写操作，清单每更新一次就弹一张审批卡。用 `todo.plan` |
 | 11 | 深色主题只覆盖了 `--gray-*` | `--surface-1` 原先是字面量 `#FFFFFF`，深色下不翻转 → 拿它做底的卡片白底配浅字，几乎读不出来。新增卡片优先用 `--gray-25/--gray-50`（跟计划卡一致），别用 `--surface-1` |
 | 12 | 前端按 id 追加卡片 | 清单卡每步回传同一个 id，`mergeThread()` 必须按 id 原位替换，否则一个 20 步任务刷出 20 张清单 |
 | 13 | 上下文预算写死数字 | 一律走 `resolveContextWindow()` / `measureContext()`；前端显示按 `/1000` 折算（128000 → 128k），别用 `/1024` |
+| 14 | **在仓库内验证打包产物** | 在 `devwork-app/` 下面任何位置启动 `build/pkg` 或 `win-unpacked`，都会向上命中仓库的 `package.json`（`type:module`）与 `node_modules`，把「缺 `shared/package.json`」「缺 zod」两类问题完美掩盖。**打包验证必须把产物复制到 `os.tmpdir()` 之类「祖先既无 `node_modules` 也无 `package.json`」的目录里启动**（v1.0 为此连挂两次：`zod` 未进暂存清单、`shared/` 失去 ESM 上下文） |
 
 ---
 

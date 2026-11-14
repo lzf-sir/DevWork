@@ -6,6 +6,15 @@ import pkg from './package.json';
  * Vite 配置：前端在 frontend/，5173 端口，/api 反代到 Express 3001。
  * 产物仍输出到仓库根 dist/ —— 打包契约（resources/dist）与后端同源托管都依赖它。
  */
+/**
+ * 后端端口必须跟着 DEVWORK_PORT 走。
+ *
+ * 后端（backend/src/config.ts）与 dev-supervisor 都认这个环境变量，只有这里写死 3001，
+ * 于是 `DEVWORK_PORT=3031 npm run dev` 时后端在 3031、vite 仍代理到 3001 → 全站 API 404
+ * （架构文档 §2.3 要求「改端口要同步四处」，实际只有一处支持）。默认值不变。
+ */
+const API_PORT = Number(process.env.DEVWORK_PORT ?? 3001);
+
 export default defineConfig({
   root: 'frontend',
   plugins: [react()],
@@ -30,7 +39,7 @@ export default defineConfig({
     fs: { allow: ['..'] },
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:3001',
+        target: `http://127.0.0.1:${API_PORT}`,
         changeOrigin: true,
       },
     },

@@ -53,7 +53,11 @@ export type AttachmentUploadInput = z.infer<typeof attachmentUploadSchema>;
 /** 工具调用审批：approve 放行，其余一律按拒绝处理（与服务工作层一致）。 */
 export const approvalDecisionSchema = z.object({
   decision: z.enum(['approve', 'deny']),
-  /** once = 只此一次；session = 本会话内同类都放行。 */
+  /**
+   * 1.0 一律按 once 处理：`'session'` 仅为**兼容旧客户端**保留（服务端会规范化成 once，
+   * 并在审计 detail 里标注「请求为 session，1.0 按 once 处理」）。
+   * 保留 enum 里的会话级取值是为了不把老请求变成 400，不代表会话免审是活的能力。
+   */
   scope: z.enum(['once', 'session']).optional(),
   conversationId: z.string().min(1).max(64).optional(),
   rollbackRef: z.string().max(120).optional(),

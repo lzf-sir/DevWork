@@ -295,6 +295,8 @@ export function routeAcceptedDecisions(limit = 20): { created: number; attached:
     ensureTicketConversation(get<Row>('SELECT * FROM ticket WHERE id = ?', id) as Row);
     recomputeStage(id);
     writeAudit({
+      /* 工单归属的工作区：审计要能按工作区筛到这条回收记录。 */
+      workspaceId: String(row.workspace_id ?? ''),
       actor: '系统', source: 'system',
       action: 'ticket.create', target: `ticket:${id}`,
       result: '成功', severity: 'info',
@@ -419,7 +421,9 @@ export function reapExpiredAssignments(now = new Date()): number {
   );
   expired.forEach((row) => {
     finishAssignment(String(row.id), 'failed', '执行器租约过期：进程可能被中断，本轮已回收');
+    const owner = get<Row>('SELECT workspace_id FROM ticket WHERE id = ?', String(row.ticket_id));
     writeAudit({
+      workspaceId: String(owner?.workspace_id ?? ''),
       actor: '系统', source: 'system',
       action: 'assignment.reap', target: `ticket:${String(row.ticket_id)}`,
       result: '拦截', severity: 'warn',
@@ -462,6 +466,7 @@ export function askAttention(
   );
   recomputeStage(ticketId);
   writeAudit({
+    workspaceId: String(ticket.workspace_id ?? ''),
     actor: '系统', source: 'system',
     action: 'attention.ask', target: `ticket:${ticketId}`,
     result: '待审批', severity: 'info',
@@ -493,6 +498,7 @@ export function stopTicket(ticketId: string, reason = 'stopped_by_person'): bool
   run("UPDATE ticket SET state = 'ended', ended_reason = ?, ended_at = ?, stage = 'idle' WHERE id = ?", reason, nowIso(), ticketId);
   run("UPDATE assignment SET state = 'ended', report = 'dropped', ended_at = ? WHERE ticket_id = ? AND state IN ('pending','running')", nowIso(), ticketId);
   writeAudit({
+    workspaceId: String(ticket.workspace_id ?? ''),
     actor: '用户', source: 'user',
     action: 'ticket.stop', target: `ticket:${ticketId}`,
     result: '拦截', severity: 'info', detail: `工单停止：${reason}`,

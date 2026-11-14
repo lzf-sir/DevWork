@@ -25,7 +25,7 @@ import fs from 'node:fs';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  fail, log, ok, preflight, probeHttp, step, title, warn, waitForHttp,
+  checkEnvDeps, fail, log, ok, probeHttp, step, title, warn, waitForHttp,
 } from './lib/common.mjs';
 
 const SCRIPTS_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -64,7 +64,7 @@ function forceKillTree(pid) {
 }
 
 title('DevWork 开发态（supervisor 看护模式）');
-preflight(ROOT);
+checkEnvDeps(ROOT);
 
 /* 端口门禁：占着就明说，不让「重复启动 → vite 挤去 5175」的剧本再演一遍。 */
 const apiUp = await probeHttp(API_HEALTH);

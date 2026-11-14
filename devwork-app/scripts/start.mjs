@@ -16,12 +16,15 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  fail, log, npmBin, ok, preflight, probeHttp, run, spawnForeground, step, title, warn,
+  checkEnvDeps, fail, log, npmBin, ok, probeHttp, run, spawnForeground, step, title, warn,
 } from './lib/common.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const API_PORT = 3001;
-const VITE_PORT = 5173;
+/* 端口跟 dev-supervisor / vite.config.ts / backend config.ts 同一套环境变量走。
+ * 写死 3001 的结果是：`DEVWORK_PORT=3031 npm run launch` 会去探一个没人监听的端口，
+ * 于是判定"后端空闲"、再判断"端口只有一半被占"，最后给出误导性的排障建议。 */
+const API_PORT = Number(process.env.DEVWORK_PORT ?? 3001);
+const VITE_PORT = Number(process.env.DEVWORK_VITE_PORT ?? 5173);
 const API_HEALTH = `http://127.0.0.1:${API_PORT}/api/health`;
 const VITE_ROOT = `http://127.0.0.1:${VITE_PORT}/`;
 
@@ -32,7 +35,7 @@ const prodMode = args.has('--prod');
 title('DevWork 启动自检');
 
 /* ① 环境门禁：Node 版本（node:sqlite 硬门槛）+ 依赖是否齐 */
-preflight(ROOT, { requireNode: 22 });
+checkEnvDeps(ROOT, { requireNode: 22 });
 
 /* ② 后端环境门禁：node:sqlite / WAL / 只读连接 —— 这是项目自己的 verify-env */
 step('检查后端运行环境…');
@@ -53,15 +56,15 @@ if (onlyCheck) {
   title('体检结论');
   log(`  Node        ${process.versions.node}`);
   log(`  依赖        ${fs.existsSync(path.join(ROOT, 'node_modules')) ? '已安装' : '未安装'}`);
-  log(`  后端 3001   ${apiUp ? '正在运行' : '空闲'}`);
-  log(`  前端 5173   ${viteUp ? '正在运行' : '空闲'}`);
+  log(`  后端 ${API_PORT}   ${apiUp ? '正在运行' : '空闲'}`);
+  log(`  前端 ${VITE_PORT}   ${viteUp ? '正在运行' : '空闲'}`);
   log(`  构建产物    ${fs.existsSync(path.join(ROOT, 'dist', 'index.html')) ? '已存在' : '未构建'}`);
   log('');
   ok('环境检查完成，可以启动。');
   process.exit(0);
 }
 
-/* ④ 端口状态：开发态两个端口都要空；生产态只需要 3001 空着 */
+/* ④ 端口状态：开发态两个端口都要空；生产态只需要后端端口空着 */
 const apiUp = await probeHttp(API_HEALTH);
 const viteUp = await probeHttp(VITE_ROOT);
 
@@ -81,7 +84,7 @@ async function startDev({ apiUp: api, viteUp: vite }) {
   }
   if (api !== vite) {
     fail('端口只被占用了一半：'
-      + `3001(${api ? '占用' : '空闲'}) / 5173(${vite ? '占用' : '空闲'})`);
+      + `${API_PORT}(${api ? '占用' : '空闲'}) / ${VITE_PORT}(${vite ? '占用' : '空闲'})`);
     log('  多半是上次没退干净的残留进程。占用情况：');
     log(`    API : ${API_HEALTH}`);
     log(`    VITE: ${VITE_ROOT}`);
@@ -90,7 +93,7 @@ async function startDev({ apiUp: api, viteUp: vite }) {
     process.exit(1);
   }
 
-  step('启动开发服务（后端 3001 + 前端 5173 + 桌面窗口）…');
+  step(`启动开发服务（后端 ${API_PORT} + 前端 ${VITE_PORT} + 桌面窗口）…`);
   log('  首次启动会编译前端，稍等十几秒；Ctrl+C 一次即可全部停止。');
   log('');
   spawnForeground(npmBin(), ['run', 'dev'], { cwd: ROOT });
@@ -107,7 +110,7 @@ async function startProd({ apiUp }) {
     ok('已存在构建产物 dist/');
   }
   if (apiUp) {
-    ok('检测到 3001 端口已有服务在跑，复用它（不重复起后端）');
+    ok(`检测到 ${API_PORT} 端口已有服务在跑，复用它（不重复起后端）`);
   } else {
     log('  桌面端会自动拉起后端子进程（需要系统 Node 22）。');
   }

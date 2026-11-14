@@ -141,8 +141,11 @@ function decide(req: CapabilityRequest, ctx: PermissionContext, readOnly: boolea
     }
 
     /* 写操作审批模式（perm.p2）：「每次询问」= 所有写操作都生成审批卡；
-     * 其余档位（默认按风险分级 / 本会话内记住）= 仅高风险走审批，中低风险
-     * 拒绝转建议。当前版本没有写执行通道，ask 与 deny 的区别只在 UI 卡片。 */
+     * 其余档位（默认按风险分级）= 仅高风险走审批，中低风险
+     * 拒绝转建议。写执行通道已打通：批准后由 write-executor 按
+     * precheck → 执行（快照/备份/事务）→ 校验 → 回滚就绪 管线真执行，
+     * 所以 ask 与 deny 的区别不只是 UI 卡片形态（ask 会真写盘，deny 不会）。
+     * 默认档位为只读：中低风险写一律 deny 转建议，只有用户显式批准的 plan 才真写盘。 */
     const approvalMode = String(perm.p2 ?? '按风险分级');
     const cap = capabilityFor(req);
     const needsApproval = approvalMode === '每次询问' || req.risk === 'high' || cap?.approval === 'ask';

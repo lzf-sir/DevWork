@@ -10,7 +10,8 @@
 import type { Express, Request, Response } from 'express';
 import { ApiFailure, identity, ok, queryString, wrap } from '../http/core';
 import { parseBody } from '../http/validate';
-import { writeAudit } from '../db/database';
+import { writeAudit, AUDIT_GLOBAL_SCOPE } from '../db/database';
+import { workspaceGuard } from './helpers';
 import {
   shadowEnabledSchema,
   shadowFireSchema,
@@ -108,6 +109,7 @@ export function registerShadowRoutes(app: Express): void {
     }
     if (!reviewed) throw new ApiFailure('E_NOT_FOUND', '授权草案不存在');
     writeAudit({
+      workspaceId: workspaceGuard(req) || AUDIT_GLOBAL_SCOPE,
       actor: identity(req).name, source: 'user',
       action: 'superagent.mandate.review', target: `mandate:${String(req.params.id)}`,
       result: payload.status === 'rejected' ? '拦截' : '放行', severity: 'info',
@@ -145,6 +147,8 @@ export function registerShadowRoutes(app: Express): void {
     /* 策略变更必须留痕：决策账本里每条都记 policyVersion，
      * 没有变更记录就无法解释「为什么前天那单接了、今天不接」。 */
     writeAudit({
+      /* 影子策略是全局配置（一张表一份），归属如实记为 global。 */
+      workspaceId: AUDIT_GLOBAL_SCOPE,
       actor: identity(req).name, source: 'user',
       action: 'superagent.policy.update', target: '影子策略',
       result: '成功', severity: 'info',
@@ -155,13 +159,18 @@ export function registerShadowRoutes(app: Express): void {
 
   app.patch('/api/shadow/sources', wrap(async (req: Request, res: Response) => {
     const payload = parseBody(shadowSourceSchema, req);
+    /* 工作区维度：影子源按工作区各一份，缺了它「改 A 的巡检」会连 B 一起改。
+     * 前端带上 workspaceId 就精确落到那个工作区；没带则只动最早的源（不再波及全部）。 */
+    const workspaceId = workspaceGuard(req);
     /* 先改配置再开关：开关会按最新配置重排下次触发，顺序反了会用旧时间。 */
-    if (payload.schedule) updateSourceConfig(payload.kind as SourceKind, payload.schedule);
-    const changed = setSourceEnabled(payload.kind as SourceKind, payload.enabled);
+    if (payload.schedule) updateSourceConfig(payload.kind as SourceKind, payload.schedule, workspaceId);
+    const changed = setSourceEnabled(payload.kind as SourceKind, payload.enabled, workspaceId);
     if (changed === 0) {
       throw new ApiFailure('E_NOT_FOUND', `事件源 ${payload.kind} 尚未登记，请先启动一次服务`);
     }
     writeAudit({
+      /* 归属取请求声明的工作区；全局面板未声明时如实记「全局」，不伪装成 w-ops。 */
+      workspaceId: workspaceId || AUDIT_GLOBAL_SCOPE,
       actor: identity(req).name, source: 'user',
       action: 'superagent.source.toggle', target: `source:${payload.kind}`,
       result: payload.enabled ? '放行' : '拦截', severity: 'info',
@@ -183,6 +192,7 @@ export function registerShadowRoutes(app: Express): void {
       throw new ApiFailure('E_NOT_FOUND', `事件源 ${payload.kind} 尚未登记，请先启动一次服务`);
     }
     writeAudit({
+      workspaceId: workspaceGuard(req) || AUDIT_GLOBAL_SCOPE,
       actor: identity(req).name, source: 'user',
       action: 'superagent.source.fire', target: `source:${payload.kind}`,
       result: '放行', severity: 'info',

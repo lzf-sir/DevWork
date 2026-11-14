@@ -3,8 +3,8 @@ import { useStore } from '../store';
 import { api } from '../api/client';
 import { useAssetTarget } from '../hooks/useAssetTarget';
 import type { AssetDetail, KbDocument, KbDocumentList, SearchHit } from '../api/client';
-import { DetailHeader, DetailTabs, GearSvg, MetricGrid, Pill } from '../components/ui';
-import { BookIcon, DotsIcon } from '../components/icons';
+import { DetailHeader, DetailTabs, GearSvg, Pill } from '../components/ui';
+import { BookIcon } from '../components/icons';
 import AssetConfigDrawer from '../components/AssetConfigDrawer';
 
 const TABS = [

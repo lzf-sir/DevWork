@@ -368,7 +368,7 @@ function sectionIcon(sectionId: string): React.ReactNode {
  * 命中结果按分区重新聚合，一屏看完全部匹配。
  */
 export default function SettingsView(): React.ReactElement {
-  const { state, setSettingsSection, setModal, addToast, toggleReadOnly, setModel, setTheme } = useStore();
+  const { state, setSettingsSection, setModal, addToast, toggleReadOnly, setTheme } = useStore();
   const { SETTINGS_SECTIONS, COMMAND_WHITELIST, ORG_AUDIT } = useLiveData();
   const refresh = useLiveRefresh();
   const version = useLiveVersion();
@@ -786,6 +786,8 @@ export default function SettingsView(): React.ReactElement {
                       <div className="sdesc">{group.section.desc}</div>
                       {group.section.id === 'model' ? <ModelConfigCard values={values} setValue={setValue} /> : null}
                       {group.section.id === 'perm' ? <ToolFaceCard /> : null}
+                      {group.section.id === 'perm' ? <BrowserPrivateRow /> : null}
+                      {group.section.id === 'about' ? <AboutBoundaryRow /> : null}
                       {group.section.id === 'archive' ? <ArchiveManagerCard /> : null}
                       {group.rows
                         .filter((row) => !(group.section.id === 'model' && row.id === 'maxTokens'))
@@ -809,6 +811,8 @@ export default function SettingsView(): React.ReactElement {
                     token 上限并进卡片，避免它孤零零挂在卡片外面。 */}
                 {activeSection.id === 'model' ? <ModelConfigCard values={values} setValue={setValue} /> : null}
                 {activeSection.id === 'perm' ? <ToolFaceCard /> : null}
+                {activeSection.id === 'perm' ? <BrowserPrivateRow /> : null}
+                {activeSection.id === 'about' ? <AboutBoundaryRow /> : null}
                 {activeSection.id === 'archive' ? <ArchiveManagerCard /> : null}
                 {activeSection.rows
                   .filter((row) => !(activeSection.id === 'model' && row.id === 'maxTokens'))
@@ -825,6 +829,86 @@ export default function SettingsView(): React.ReactElement {
             )}
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 内网访问状态（只读一行，**始终渲染**，不是开关）。
+ *
+ * 为什么必须有这一行：`DEVWORK_BROWSER_ALLOW_PRIVATE=1` 会让 Agent 的内置浏览器
+ * 能访问 127/10/172.16/192.168 与**本机无鉴权的服务**（Jupyter / Ollama / 各类 admin 面板）。
+ * 只写 `desktop.log` 等于没告知 —— 用户不会去翻 `%APPDATA%\DevWork\logs\`，
+ * 而"能读日志的人"和"需要被告知的人"不是同一批。
+ *
+ * 四条原则：
+ *   ① 数据只从 `/api/health.browserAllowPrivate` 取，前端不自己读环境变量
+ *      （前端进程根本拿不到后端的 env，读了必然错）；
+ *   ② **始终渲染三态**：只在"已开启"时渲染的话，绝大多数用户永远看不到这一行，
+ *      README 那句"设置页会显示当前状态"就只对少数人成立；复核时也分不清
+ *      「找不到」与「没开启所以不显示」。
+ *   ③ 拿不到值时显示「未获取到状态」，**不默认"未开启"** —— "未开启"是断言，
+ *      后端不通时我们并不知道；这与 empty.ts 那套"宁可不显示也不糊假数据"一致。
+ *   ④ 不做成可点击控件：打包态改不了环境变量，能点但点不动的按钮就是新的界面说谎。
+ */
+function BrowserPrivateRow(): React.ReactElement {
+  const [enabled, setEnabled] = useState<boolean | undefined>(undefined);
+  const [offline, setOffline] = useState<boolean>(false);
+
+  useEffect(() => {
+    let alive = true;
+    void api.health().then((envelope) => {
+      if (!alive) return;
+      if (!envelope.ok) {
+        setOffline(true);
+        return;
+      }
+      /* browserAllowPrivate() 是每次调用读 env（config.ts 特意写在函数体里），
+       * 所以这里拿到的是**实时值**，不存在"启动时算好之后不变"的陈旧问题。 */
+      setEnabled(envelope.data.browserAllowPrivate);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  /* 三态文案定死（验收按这三条字面量核对）。 */
+  const stateText = offline || enabled === undefined
+    ? '内网访问：未获取到状态'
+    : enabled
+      ? '内网访问：已开启（由环境变量 DEVWORK_BROWSER_ALLOW_PRIVATE 提供）'
+      : '内网访问：未开启（默认）';
+
+  return (
+    <div className="srow">
+      <div className="sl">
+        <div className="sn">{stateText}</div>
+        <div className="sd2">
+          Agent 浏览器工具默认不可访问本机与内网地址；如需自托管内网 Wiki 等场景，
+          需在启动前设置该环境变量。
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 关于页的能力口径（只读两行，与 README「能力边界」逐字一致）。
+ *
+ * PRD P0-7 要求「README **与关于页**统一标注」，而关于页此前只有"版本、运行环境与诊断"，
+ * 用户在本机唯一能看到"这版到底能干什么"的地方却什么都没说。
+ *
+ * 措辞是裁决过的对外口径：只说「受控写（实验性）」——
+ * 不说"纯只读"（代码里确实能写），也不说"写能力已开放"（默认只读 + 中低风险 deny）。
+ * 不做成可点控件：这里没有任何可设置的东西。
+ */
+function AboutBoundaryRow(): React.ReactElement {
+  return (
+    <div className="srow">
+      <div className="sl">
+        <div className="sn">能力：只读为主 + 写操作逐次人工批准（受控写 · 实验性）</div>
+        <div className="sd2">写执行仅在显式批准的 plan 上生效，可回滚；默认只读模式开启</div>
       </div>
     </div>
   );
@@ -915,7 +999,7 @@ function formatWhen(iso?: string | null): string {
  * 列表跨工作区：设置是全局入口，不该按工作区切来切去。
  */
 function ArchiveManagerCard(): React.ReactElement {
-  const { state, addToast, setModal, unarchiveConversation, removeConversation } = useStore();
+  const { state, setModal, unarchiveConversation, removeConversation } = useStore();
   const [items, setItems] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [offline, setOffline] = useState<boolean>(false);

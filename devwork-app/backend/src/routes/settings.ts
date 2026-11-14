@@ -11,7 +11,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ApiFailure, fail, identity, ok, queryString, wrap } from '../http/core';
-import { all, get, run, writeAudit, newId, nowIso } from '../db/database';
+import { AUDIT_GLOBAL_SCOPE, all, get, run, writeAudit, newId, nowIso } from '../db/database';
 import { demoDb } from '../db/database';
 import {
   allPanels,
@@ -83,7 +83,7 @@ import { normalizeBrowserUrl, readBrowserPage, readBrowserState, writeBrowserPag
 import { PORT } from '../config';
 
 type Row = Record<string, unknown>;
-import { body, requireRow } from './helpers';
+import { body, requireRow, workspaceGuard } from './helpers';
 import { parseBody } from '../http/validate';
 import { permissionProbeSchema, sensitiveRulesSchema, settingSectionPatchSchema } from '../../../shared/contracts';
 import { llmKeySchema, llmProfileSchema, llmTestSchema, llmModelsSchema } from '../../../shared/contracts';
@@ -98,7 +98,7 @@ export function registerSettingsRoutes(app: Express): void {
     const who = await identity(req);
     const result = await setLlmKey(secret);
     writeAudit({
-      workspaceId: 'w-ops', actor: who.name, source: 'user',
+      workspaceId: AUDIT_GLOBAL_SCOPE, actor: who.name, source: 'user',
       action: 'credential.llm-key.set', target: 'vault/llm-api-key', result: result.stored ? '成功' : '降级',
       severity: result.stored ? 'info' : 'warn',
       detail: result.stored ? '模型 Key 已加密存入本机钥匙串（safeStorage）' : 'safeStorage 不可用，Key 未落盘',
@@ -158,7 +158,7 @@ export function registerSettingsRoutes(app: Express): void {
       keyStored = keyResult.stored;
     }
     writeAudit({
-      workspaceId: 'w-ops', actor: who.name, source: 'user',
+      workspaceId: AUDIT_GLOBAL_SCOPE, actor: who.name, source: 'user',
       action: 'setting.llm-config', target: profile.label,
       result: '生效', severity: 'info',
       detail: `provider=${provider} baseUrl=${baseUrl} model=${model}`
@@ -192,7 +192,7 @@ export function registerSettingsRoutes(app: Express): void {
       keyStored = keyResult.stored;
     }
     writeAudit({
-      workspaceId: 'w-ops', actor: who.name, source: 'user',
+      workspaceId: AUDIT_GLOBAL_SCOPE, actor: who.name, source: 'user',
       action: 'setting.llm-profile.add', target: label,
       result: '成功', severity: 'info',
       detail: `新增模型档案「${label}」· provider=${provider} model=${model} baseUrl=${baseUrl}`
@@ -226,7 +226,7 @@ export function registerSettingsRoutes(app: Express): void {
       keyStored = keyResult.stored;
     }
     writeAudit({
-      workspaceId: 'w-ops', actor: who.name, source: 'user',
+      workspaceId: AUDIT_GLOBAL_SCOPE, actor: who.name, source: 'user',
       action: 'setting.llm-profile.update', target: label,
       result: '生效', severity: 'info',
       detail: `修改模型档案「${before.label}」→「${label}」· provider=${provider} model=${model}`
@@ -249,7 +249,7 @@ export function registerSettingsRoutes(app: Express): void {
     /* 档案没了，它那把钥匙也必须消失 —— 否则"已删除"只是界面上的一句话。 */
     const keyRemoved = await deleteSecret(llmProfileKeyRef(target));
     writeAudit({
-      workspaceId: 'w-ops', actor: who.name, source: 'user',
+      workspaceId: AUDIT_GLOBAL_SCOPE, actor: who.name, source: 'user',
       action: 'setting.llm-profile.remove', target: target.label,
       result: '成功', severity: 'warn',
       detail: `删除模型档案「${target.label}」（${target.model}）· 本机钥匙串中的 Key ${keyRemoved ? '已一并清除' : '未找到，无需清除'}`,
@@ -266,7 +266,7 @@ export function registerSettingsRoutes(app: Express): void {
     if (!target) throw new ApiFailure('E_NOT_FOUND', `模型档案不存在：${id}`);
     await saveLlmProfiles(list, id);
     writeAudit({
-      workspaceId: 'w-ops', actor: who.name, source: 'user',
+      workspaceId: AUDIT_GLOBAL_SCOPE, actor: who.name, source: 'user',
       action: 'setting.llm-profile.activate', target: target.label,
       result: '生效', severity: 'info',
       detail: `当前模型切换为「${target.label}」（${target.model} · ${target.baseUrl}）`,
@@ -291,7 +291,7 @@ export function registerSettingsRoutes(app: Express): void {
     }
     const result = await testLlmConnection({ baseUrl, model, apiKey: inputKey || apiKey });
     writeAudit({
-      workspaceId: 'w-ops', actor: who.name, source: 'user',
+      workspaceId: AUDIT_GLOBAL_SCOPE, actor: who.name, source: 'user',
       action: 'setting.llm-config.test', target: `${baseUrl} · ${model}`,
       result: result.ok ? `成功 · ${result.latencyMs}ms` : `失败 · ${result.message.slice(0, 60)}`,
       severity: result.ok ? 'info' : 'warn',
@@ -314,7 +314,7 @@ export function registerSettingsRoutes(app: Express): void {
       apiKey: String(payload.apiKey ?? '').trim(),
     });
     writeAudit({
-      workspaceId: 'w-ops', actor: who.name, source: 'user',
+      workspaceId: AUDIT_GLOBAL_SCOPE, actor: who.name, source: 'user',
       action: 'setting.llm-models.fetch', target: baseUrl || String(payload.provider ?? '') || '—',
       result: result.source === 'live' ? `成功 · ${result.models.length} 个` : `回落兜底 · ${result.models.length} 个`,
       severity: result.source === 'live' ? 'info' : 'warn',
@@ -343,7 +343,8 @@ export function registerSettingsRoutes(app: Express): void {
       actor: payload.actor === 'agent' ? 'agent' : 'user',
       action: String(payload.action ?? 'read'),
       risk: payload.risk === 'high' || payload.risk === 'medium' ? payload.risk : 'low',
-      workspaceId: 'w-ops',
+      /* 探测只在界面上模拟判定，请求没声明工作区时不伪装成某个具体工作区。 */
+      workspaceId: workspaceGuard(req) || AUDIT_GLOBAL_SCOPE,
       assetId: typeof payload.assetId === 'string' ? payload.assetId : undefined,
     }, kernelIdentity(await identity(req)));
     ok(res, {
@@ -375,7 +376,7 @@ export function registerSettingsRoutes(app: Express): void {
     run('DELETE FROM context_snapshot');
     run('DELETE FROM usage_stat');
     const auditId = writeAudit({
-      workspaceId: 'w-ops', actor: (await identity(req)).name, source: 'user',
+      workspaceId: AUDIT_GLOBAL_SCOPE, actor: (await identity(req)).name, source: 'user',
       action: 'maintenance.clear-cache', target: '本机缓存', result: '成功', severity: 'info',
       detail: `清除上下文快照 ${snapshots} 条、用量统计 ${usage} 条；会话/产物/审计/索引未改动`,
     });
@@ -393,7 +394,7 @@ export function registerSettingsRoutes(app: Express): void {
     if (typeof patch.readOnlyMode === 'boolean') current.readOnlyMode = patch.readOnlyMode;
     run('UPDATE setting SET raw = ? WHERE section = ?', JSON.stringify(current), section);
     writeAudit({
-      workspaceId: 'w-ops', actor: (await identity(req)).name, source: 'user',
+      workspaceId: workspaceGuard(req) || AUDIT_GLOBAL_SCOPE, actor: (await identity(req)).name, source: 'user',
       action: `setting.change · ${section}`, target: section, result: '生效', severity: 'info',
       detail: `before→after: ${JSON.stringify(patch)}`,
     });

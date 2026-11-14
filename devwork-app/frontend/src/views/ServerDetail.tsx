@@ -3,7 +3,7 @@ import { useStore } from '../store';
 import { api, type TermLine } from '../api/client';
 import { useLiveData, useLiveRefresh } from '../api/live';
 import { useAssetTarget } from '../hooks/useAssetTarget';
-import { Banner, DetailHeader, DetailTabs, GearSvg, KV, MetricGrid, Pill } from '../components/ui';
+import { Banner, DetailHeader, DetailTabs, GearSvg, Pill } from '../components/ui';
 import { ChatIcon, DotsIcon, ServerIcon } from '../components/icons';
 import AssetConfigDrawer from '../components/AssetConfigDrawer';
 

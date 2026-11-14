@@ -11,7 +11,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ApiFailure, fail, identity, ok, queryString, wrap } from '../http/core';
-import { all, get, run, writeAudit, newId, nowIso } from '../db/database';
+import { AUDIT_GLOBAL_SCOPE, all, get, run, writeAudit, newId, nowIso } from '../db/database';
 import { demoDb } from '../db/database';
 import {
   allPanels,
@@ -90,7 +90,8 @@ export function registerAuditRoutes(app: Express): void {
     const rows = await auditRows(req);
     const total = await auditTotal(req);
     const auditId = writeAudit({
-      workspaceId: 'w-ops', actor: (await identity(req)).name, source: 'user',
+      /* 导出的是「筛选命中的全部记录」，跨工作区；它不属于任何单个工作区。 */
+      workspaceId: AUDIT_GLOBAL_SCOPE, actor: (await identity(req)).name, source: 'user',
       action: 'audit.export', target: '审计日志', result: '成功', severity: 'info',
       detail: exportDetail(rows.length, total),
     });
@@ -100,7 +101,8 @@ export function registerAuditRoutes(app: Express): void {
     const rows = await auditRows(req);
     const total = await auditTotal(req);
     const auditId = writeAudit({
-      workspaceId: 'w-ops', actor: (await identity(req)).name, source: 'user',
+      /* 导出的是「筛选命中的全部记录」，跨工作区；它不属于任何单个工作区。 */
+      workspaceId: AUDIT_GLOBAL_SCOPE, actor: (await identity(req)).name, source: 'user',
       action: 'audit.export', target: '审计日志', result: '成功', severity: 'info',
       detail: exportDetail(rows.length, total),
     });

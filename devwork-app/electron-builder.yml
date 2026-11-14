@@ -1,6 +1,9 @@
 appId: com.devwork.desktop
 productName: DevWork
-copyright: DevWork local demo
+# 产物属性里的版权文案（闭源私有，别写 "local demo"）。
+# 注意：这里**不得**出现 version 字段 —— 版本号只能来自 package.json，
+# scripts/check-version.mjs 会把硬编码 version 判为错误。
+copyright: Copyright © 2026 DevWork
 asar: true
 
 # 本项目没有需要按 Electron ABI 重编的原生模块（esbuild 的平台二进制在 resources 里，
@@ -37,6 +40,12 @@ extraResources:
   # 相对路径才对得上（resources/server/src/routes → ../../../ = resources/）。
   - from: build/pkg/shared
     to: shared
+  # shared/ 的运行期依赖（只有 zod）：ESM 裸包解析从「import 语句所在文件」向上找
+  # node_modules —— resources/shared/contracts → resources/shared/node_modules
+  # → resources/node_modules。resources/server/node_modules 不在这条链上，
+  # 所以这份必须落在 resources 根。
+  - from: build/pkg/node_modules
+    to: node_modules
   # 内置 Node 22 运行时：**这是"免安装也能跑"的前提**。
   # 后端是独立 Node 进程且依赖 node:sqlite（Node 22.5+ 才有），而 Electron 33
   # 自带的是 Node 20.x，不带 node:sqlite。目标机没装 Node 就只能看到报错页。

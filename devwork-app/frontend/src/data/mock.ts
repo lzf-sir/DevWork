@@ -119,7 +119,12 @@ export type Message = (
       executionOk?: boolean;
       /** 裁决后才有：回滚引用 JSON（可回滚时非空，「回滚」按钮据此显示）。 */
       rollbackRef?: string | null;
-      /** 本卡裁决时的 scope（once/session），展示「本会话免审」是否已生效。 */
+      /**
+       * 本卡裁决时的 scope。
+       *
+       * 1.0 一律 'once'（后端 fixed 语义，只为兼容旧客户端保留这个字段）；
+       * 前端**不再**拿它渲染任何「免审生效」提示 —— 保留字段是为了演示数据形状不变。
+       */
       scope?: string;
     }
   /** 建议卡：deny / suggest 裁决的产物，只给命令与解释，没有批准按钮。 */
@@ -1136,8 +1141,18 @@ export const SETTINGS_SECTIONS: SettingSection[] = [
       {
         id: 'p2',
         name: '写操作审批',
-        desc: '每次询问=所有写操作弹审批；按风险分级=仅高风险弹审批，低风险直接执行',
-        control: { type: 'select', options: ['每次询问', '本会话内记住', '按风险分级'], value: '每次询问' },
+        desc: '每次询问=所有写操作弹审批；按风险分级=高风险弹审批，中低风险写一律拒绝并转建议（不会自动执行）',
+        /**
+         * 只有两档。
+         *
+         * 原来还有第三档（声称"会话内记住审批"），但 1.0 没有会话级审批记忆
+         * （后端 kernel/permission.ts 只把它当"非每次询问"处理，等价于按风险分级）——
+         * 选了它语义并不成立，是同一类"界面说谎"。已删除，存量值由后端
+         * migrate.ts 一次性归一为「按风险分级」。
+         * 注意：这里的 value 是**中文文案本身**（历史原因，不是稳定 ID），
+         * 所以删除选项必须与后端迁移同版本发布，否则老库会短暂渲染出空选中项。
+         */
+        control: { type: 'select', options: ['每次询问', '按风险分级'], value: '每次询问' },
       },
       {
         id: 'p3',
@@ -1230,7 +1245,9 @@ export const SETTINGS_SECTIONS: SettingSection[] = [
     id: 'about',
     label: '关于',
     title: '关于',
-    desc: '版本、运行环境与诊断',
+    /* 能力口径与 README 一致：对外只说「受控写（实验性）」，
+     * 既不说"纯只读"（代码里能写），也不说"写能力已开放"（默认 deny/ask）。 */
+    desc: '版本、运行环境与诊断 · 受控写（实验性）',
     rows: [
       {
         id: 'a1',

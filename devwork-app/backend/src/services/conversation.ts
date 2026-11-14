@@ -10,6 +10,7 @@
 import fs from 'node:fs';
 import { ApiFailure, type Identity } from '../http/core';
 import { all, get, newId, nowIso, run, tx, writeAudit } from '../db/database';
+import { resolveWorkspaceIdForAsset } from './workspace-repos';
 import { artifactPath } from '../sandbox/bootstrap';
 import {
   allPanels,
@@ -26,7 +27,6 @@ import { deriveToolFace, gatewayToolFace, derivedTool, type DerivedTool, type To
 import { executeAgentTool } from './agent-tools';
 import { executeFileWrite, executeDbWrite, executeSrvTemplate, rollbackWritePlan } from './write-executor';
 import {
-  approvalKeyOf, grantSessionApproval, hasSessionApproval,
   breakerTripped, breakerStatus, recordWriteDeny, recordWriteSuccess,
 } from './session-approvals';
 import { requireCredential } from './credential';
@@ -124,15 +124,22 @@ async function executeWritePlan(
   face: ToolFace,
   identity: Identity,
   workspaceId: string,
+  conversationId = '',
 ): Promise<{ ok: boolean; message: string; rollbackRef?: string; diskChanged: boolean }> {
   const tool = derivedTool(face, toolName);
   const assetId = writeTargetAssetId(toolName, tool, face);
+  /* 归属三级：① 资源实际归属 → ② 调用方给的会话归属 → ③ 空串。
+   * 跨工作区会话（conversation.workspace_id ≠ asset.workspace_id）是 1.0 的合法状态，
+   * 这类审计必须以**资源实际归属**为准，否则「这条写动的是哪个工作区的文件」说不清。
+   * 任何情况都不回落默认工作区：不认识就记空串，detail 里标 workspace:unknown。 */
+  const ownerWorkspaceId = resolveWorkspaceIdForAsset(assetId) ?? workspaceId;
   switch (toolName) {
     case 'code_edit':
     case 'fs_write_file':
-      return executeFileWrite(assetId, String(args.path ?? ''), String(args.content ?? ''), identity, workspaceId);
+      /* conversationId 决定快照落点（DATA_DIR/snapshots/<会话>/），不再写进用户仓库。 */
+      return executeFileWrite(assetId, String(args.path ?? ''), String(args.content ?? ''), identity, ownerWorkspaceId, conversationId);
     case 'db_query_write':
-      return executeDbWrite(String(args.sql ?? ''), identity, workspaceId);
+      return executeDbWrite(String(args.sql ?? ''), identity, ownerWorkspaceId);
     case 'srv_exec': {
       let params: Record<string, unknown> = {};
       if (typeof args.params === 'string') {
@@ -140,7 +147,7 @@ async function executeWritePlan(
       } else if (args.params && typeof args.params === 'object') {
         params = args.params as Record<string, unknown>;
       }
-      return executeSrvTemplate(assetId, String(args.action ?? ''), params, identity, workspaceId);
+      return executeSrvTemplate(assetId, String(args.action ?? ''), params, identity, ownerWorkspaceId);
     }
     default:
       return { ok: false, message: `工具 ${toolName} 属于演示轨迹遗留名，无可执行内容（不假装执行）`, diskChanged: false };
@@ -199,15 +206,9 @@ export function makeToolExecutor(
             + '降级路径：产出建议卡说明意图与被拒原因，由用户手动执行。',
         };
       }
-      const key = approvalKeyOf(toolAction(toolName), targetTypeOf(toolName, args), toolRisk(toolName));
-      if (hasSessionApproval(conversationId, key)) {
-        const outcome = await executeWritePlan(toolName, args, face, identity, workspaceId);
-        if (outcome.ok) recordWriteSuccess(conversationId);
-        return {
-          ok: outcome.ok,
-          result: `${outcome.message}\n（命中会话级审批记忆：${key}）${outcome.rollbackRef ? `\n回滚引用已就绪：${outcome.rollbackRef.slice(0, 200)}` : ''}`,
-        };
-      }
+      /* 1.0 不做会话级免审：这里不再查询「本会话内允许」记忆，
+       * 写意图一律走「生成审批卡 → 人逐次批准」这一条路
+       * （记忆键不含参数，批准一次就等于免审写任意文件，口径无法自洽）。 */
       return {
         ok: false,
         result: '写操作未执行：待人工审批（审批卡已生成；批准后按 precheck → 执行 → 校验 → 回滚就绪 管线运行）',
@@ -461,11 +462,8 @@ export async function sendMessage(
         try { parsedArgs = JSON.parse(event.args) as Record<string, unknown>; } catch { /* 非 JSON 参数不阻断裁决 */ }
         const targetPath = typeof parsedArgs.path === 'string' ? parsedArgs.path : undefined;
 
-        /* 会话级审批记忆（设计 §6.4）：记忆键 = intent+targetType+risk，不含具体参数。
-         * 命中时 ask → allow（审计里保留原裁决链）。 */
-        const memoryKey = approvalKeyOf(action, targetTypeOf(event.toolName, parsedArgs), risk);
-        const sessionApproved = isWrite && hasSessionApproval(conversationId, memoryKey);
-
+        /* 1.0 不做会话级审批记忆：写工具一律由内核按 ask 裁决，逐次生成审批卡。
+         * 会话免审的记忆键不含参数（设计 §6.4），对「写任意文件」这类动作等于长期免审。 */
         const kernelVerdict = await check({
           actor: 'agent', action, risk,
           workspaceId: conversation.workspace_id,
@@ -473,27 +471,13 @@ export async function sendMessage(
           path: targetPath,
           payload: { toolName: event.toolName },
         }, ctx);
-        const verdict = sessionApproved && kernelVerdict.effect === 'ask'
-          ? { ...kernelVerdict, effect: 'allow' as const, reason: `会话级审批记忆命中（${memoryKey}），本类操作本会话内免审` }
-          : kernelVerdict;
+        const verdict = kernelVerdict;
         auditIds.push(verdict.auditId);
 
         /* 连拒熔断（设计 §5.4）：写操作被拒/转建议计数，≥3 熔断本轮。 */
         if (isWrite && (verdict.effect === 'deny' || verdict.effect === 'suggest')) recordWriteDeny(conversationId);
 
-        /* 会话记忆命中且网关未真执行（Mock 写步骤不走执行器）→ 分支级补执行。
-         * 标记字符串与执行器返回文案一致，避免 OpenAI 路径双重执行。 */
-        let effective = event;
-        if (sessionApproved && isWrite && verdict.effect === 'allow'
-          && !String(event.result ?? '').includes('命中会话级审批记忆')) {
-          const outcome = await executeWritePlan(event.toolName, parsedArgs, face, identity, conversation.workspace_id);
-          if (outcome.ok) recordWriteSuccess(conversationId);
-          effective = {
-            ...event,
-            result: `${outcome.message}\n（命中会话级审批记忆：${memoryKey}）`,
-            ok: outcome.ok,
-          };
-        }
+        const effective = event;
 
         const ok = effective.ok !== false;
         const cardPayload: Record<string, unknown> = {
@@ -527,12 +511,13 @@ export async function sendMessage(
           cardPayload.command = `${effective.toolName} ${effective.args}`;
           cardPayload.executable = false;
           cardPayload.resolved = false;
-          /* V2 写执行计划：批准后由 write-executor 按三层防线真执行（会话记忆键随卡登记）。 */
+          /* V2 写执行计划：批准后由 write-executor 按三层防线真执行。
+           * 1.0 不再登记会话级免审记忆（memoryKey 字段保留为空串以兼容旧卡结构）。 */
           cardPayload.plan = {
             toolName: effective.toolName,
             args: parsedArgs,
             targetType: targetTypeOf(effective.toolName, parsedArgs),
-            memoryKey,
+            memoryKey: '',
             derivedAssetId: writeTargetAssetId(effective.toolName, derivedTool(face, effective.toolName), face),
           };
           cardPayload.constraints = verdict.constraints ?? { approvalCard: true, executable: false, diskChanged: false };
@@ -840,6 +825,8 @@ export async function truncateMessages(
     messageId, conversationId,
   );
   if (!row) throw new ApiFailure('E_NOT_FOUND', `消息不存在：${messageId}`);
+  /* 会话归属：审计要用真实工作区，不能取默认工作区顶替。 */
+  const owner = get<{ workspace_id: string }>('SELECT workspace_id FROM conversation WHERE id = ?', conversationId);
   const boundaryOp = mode === 'after' ? '>' : '>=';
   const doomed = all<{ id: string; kind: string; payload: string }>(
     `SELECT id, kind, payload FROM message WHERE conversation_id = ? AND rowid ${boundaryOp} ? ORDER BY rowid`,
@@ -960,12 +947,15 @@ export async function truncateMessages(
   }
   let payload: Record<string, unknown> = {};
   try { payload = JSON.parse(row.payload) as Record<string, unknown>; } catch { /* payload 损坏不影响截断 */ }
+  /* 归属三级：会话的 workspace_id 拿不到就记空串 + workspace:unknown（不回落默认工作区）。 */
+  const truncateWorkspaceId = String(owner?.workspace_id ?? '');
   writeAudit({
-    workspaceId: 'w-ops', conversationId, actor: 'user', source: 'user',
+    workspaceId: truncateWorkspaceId, conversationId, actor: 'user', source: 'user',
     action: mode === 'after' ? 'message.retry_reset' : 'message.truncate',
     target: messageId, result: '成功', severity: 'warn',
     detail: `会话 ${conversationId} 从消息 ${messageId}（${mode}）截断 ${doomed.length} 条，`
-      + `同步清理产物 ${artifacts} 个 / 文件 ${files} 个 / 引用 ${citations} 条 / 工具调用 ${toolCalls} 条，上下文已回退`,
+      + `同步清理产物 ${artifacts} 个 / 文件 ${files} 个 / 引用 ${citations} 条 / 工具调用 ${toolCalls} 条，上下文已回退`
+      + (truncateWorkspaceId === '' ? ' · workspace:unknown' : ''),
   });
   return {
     deleted: doomed.length,
@@ -1004,7 +994,10 @@ export async function rollbackApproval(
   }
   const who = identityName || '本机用户';
   const conversation = get<{ workspace_id: string }>('SELECT workspace_id FROM conversation WHERE id = ?', conversationId);
-  const workspaceId = conversation?.workspace_id ?? 'w-ops';
+  /* 上面的审批卡查询已经证明这个会话存在，所以这里没有回落默认工作区的必要：
+   * 真查不到就显式报错 —— 拿默认工作区去解析回滚路径会把文件还原到别人的目录。 */
+  const workspaceId = String(conversation?.workspace_id ?? '');
+  if (workspaceId === '') throw new ApiFailure('E_NOT_FOUND', `会话不存在，无法定位回滚所属工作区：${conversationId}`);
   const result = await rollbackWritePlan(String(payload.rollbackRef), { name: who, org: 'DevWork', actor: 'user', source: 'user' }, workspaceId);
   const card = await insertCard(conversationId, 'text', {
     content: `回滚${result.ok ? '成功' : '失败'}：${result.message}`,
@@ -1070,7 +1063,9 @@ export async function citationDetail(citationId: string): Promise<Record<string,
  * 审批裁决 + V2 写执行。
  * approve 且卡片带可执行 plan（code_edit / db_query_write / srv_exec / fs_write_file）时，
  * 走 write-executor 三层防线真执行；演示轨迹遗留名没有可执行内容，如实说明。
- * scope='session' 时登记会话级审批记忆（记忆键 = intent+targetType+risk，不含参数）。
+ *
+ * `scope` 是**客户端请求的口径**（可能是 session），只用于审计里说明"请求的档位已被降级"。
+ * 生效口径恒为 once：函数入口即规范化，卡片 payload / 审计 / 返回值都写 scopeApplied。
  */
 export async function respondApproval(
   conversationId: string,
@@ -1095,32 +1090,41 @@ export async function respondApproval(
 
   const command = String(payload.command ?? payload.toolName ?? messageId);
   const who = identityName || '本机用户';
+  /* 1.0 不做会话免审：在服务层入口把入参**规范化**，之后一律只用 scopeApplied。
+   * 为什么不只靠路由归一：审批有两个路由（/conversations/:id/approvals/:messageId 与
+   * /approvals/:messageId），将来再加一条时若忘了归一，卡片与审计就会回显 session
+   * 却只执行一次 ——「记录说按会话授权、实际只批一次」正是本轮在清的那类不实记录。 */
+  const scopeApplied: 'once' = 'once';
+  const owner = get<{ workspace_id: string }>('SELECT workspace_id FROM conversation WHERE id = ?', conversationId);
+  /* 审计归属：会话存在就取它的 workspace_id；拿不到（老库 / 异常数据）记空串，
+   * 并在 detail 里写明 workspace:unknown —— 绝不拿"看起来存在"的默认值伪装成
+   * 某个工作区（那等于把硬编码搬个位置，按工作区筛审计照样查错）。 */
+  const conversationWorkspaceId = String(owner?.workspace_id ?? '');
+  const workspaceNote = conversationWorkspaceId === '' ? ' · workspace:unknown' : '';
   /* 裁决是真事件，必须落进审计表；只返回一个自己编的 auditId 等于假装记了审计。 */
   const auditId = writeAudit({
-    workspaceId: 'w-ops', conversationId, actor: who, source: 'user',
+    workspaceId: conversationWorkspaceId, conversationId, actor: who, source: 'user',
     action: 'approval.decide', target: command.slice(0, 120),
     result: decision === 'approve' ? '批准' : '拒绝',
     severity: decision === 'approve' ? 'warn' : 'info',
-    detail: `审批裁决：${decision} · scope=${scope} · 工具=${String(payload.toolName ?? '')} · 原因=${String(payload.reason ?? '')}`,
+    detail: `审批裁决：${decision} · scope=${scopeApplied}${scope === 'session' ? '（请求为 session，1.0 按 once 处理）' : ''}`
+      + ` · 工具=${String(payload.toolName ?? '')} · 原因=${String(payload.reason ?? '')}${workspaceNote}`,
   });
 
-  /* 会话级审批记忆：只对批准方向登记；记忆键来自卡片 plan（intent+targetType+risk）。 */
   const plan = (payload.plan ?? null) as Record<string, unknown> | null;
-  if (decision === 'approve' && scope === 'session' && plan) {
-    grantSessionApproval(conversationId, String(plan.memoryKey ?? ''));
-  }
+  /* 会话级审批记忆已在 1.0 下线：不再 grantSessionApproval，写操作逐次批准。 */
 
   /* V2 写执行：批准 + 有可执行 plan → 三层防线真执行。 */
   let executed: { ok: boolean; message: string; rollbackRef?: string; diskChanged: boolean } | null = null;
   if (decision === 'approve' && plan && typeof plan.toolName === 'string') {
-    const conversation = get<{ workspace_id: string }>('SELECT workspace_id FROM conversation WHERE id = ?', conversationId);
     const identity: Identity = { name: who, org: 'DevWork', actor: 'user', source: 'user' };
     executed = await executeWritePlan(
       String(plan.toolName),
       (plan.args ?? {}) as Record<string, unknown>,
-      await deriveToolFace(conversation?.workspace_id ?? 'w-ops'),
+      await deriveToolFace(conversationWorkspaceId),
       identity,
-      conversation?.workspace_id ?? 'w-ops',
+      conversationWorkspaceId,
+      conversationId,
     );
     if (executed.ok) recordWriteSuccess(conversationId);
     else recordWriteDeny(conversationId);
@@ -1136,7 +1140,7 @@ export async function respondApproval(
       decidedBy: who,
       decidedAt: nowIso(),
       auditId,
-      scope,
+      scope: scopeApplied,
       ...(executed ? {
         executed: true,
         executionOk: executed.ok,
@@ -1149,11 +1153,16 @@ export async function respondApproval(
     messageId,
   );
 
+  /* 这张 text 卡是**落库记录**，将来回看时要能看出「逐次批准」的口径：
+   * 只写"已通过"会让人以为此后同类操作都放行了（1.0 实际逐次审批）。 */
+  const perTimeNote = '下次同类操作仍需再次批准。';
   const text = decision === 'approve'
     ? (executed
-      ? `审批已通过并记入审计（${auditId}）：${command}\n执行结果：${executed.message}`
-      : `审批已通过并记入审计（${auditId}）：${command}。该工具没有可执行内容（演示轨迹遗留名），如需落地请按建议手动执行。`)
-    : `审批已拒绝并记入审计（${auditId}）：${command}。无副作用，磁盘零变更。${scope === 'session' ? '' : ''}`;
+      ? `审批已通过并记入审计（${auditId}）：${command}\n执行结果：${executed.message}${perTimeNote}`
+      : `审批已通过并记入审计（${auditId}）：${command}。该工具没有可执行内容（演示轨迹遗留名），如需落地请按建议手动执行。${perTimeNote}`)
+    /* 拒绝文案里说清「你请求的是会话级、1.0 只按单次处理」——这是说明降级，不是宣称已免审。 */
+    : `审批已拒绝并记入审计（${auditId}）：${command}。无副作用，磁盘零变更。`
+      + (scope === 'session' ? '（请求为会话级，1.0 按单次处理）' : '');
 
   const card = await insertCard(conversationId, 'text', {
     content: text,
@@ -1177,7 +1186,10 @@ export async function respondApproval(
     ...cardShape(card, conversationId),
     resolvedCard,
     decision,
-    scope,
+    /* 回报实际生效的审批口径（恒为 once），前端据此不再显示「本会话内允许」。
+     * scopeApplied 是显式字段：请求里的 session 只是被规范化，绝不能原样回显成"已按会话授权"。 */
+    scope: scopeApplied,
+    scopeApplied: scopeApplied,
     auditId,
     executed: executed ? executed.ok : false,
     diskChanged: executed ? executed.diskChanged : false,

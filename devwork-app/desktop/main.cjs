@@ -13,6 +13,14 @@ const { pathToFileURL } = require('node:url');
 const { execFileSync, spawn } = require('node:child_process');
 const electronModule = require('electron');
 
+/**
+ * 后端端口**写死 3001**，打包态不受任何环境变量控制。
+ *
+ * 这不是疏忽，而是发布口径：壳与后端必须共享同一份端口假设，否则就是
+ * 「壳探 3001、后端听 3031」的静默分叉（见 buildBackendEnv 里钉死 DEVWORK_PORT 的说明）。
+ * 因此 A15 里「端口被占用」的验证必须由外部实例占住 **3001 本身**，
+ * 不存在"换个端口验"的路子；也不存在 DEVWORK_SERVER_PORT 这种变量。
+ */
 const API_PORT = 3001;
 const VITE_PORT = 5173;
 
@@ -192,6 +200,21 @@ let backendChild = null;
 let shuttingDown = false;
 let isDev = false;
 let tray = null;
+/** 自动重启预算：只自动重启一次，避免「崩 → 重启 → 崩」的无限循环刷日志。 */
+let restartCount = 0;
+/** 退避定时器句柄：关停时要清掉，否则关窗后还会冒出一个后端进程。 */
+let restartTimer = null;
+/**
+ * 主窗口当前是不是停在错误页。
+ *
+ * 错误页上没有可用后端，托盘里也没有可操作的东西：这时点关闭必须**直接退出**，
+ * 不能像正常状态那样「最小化到托盘」—— 否则用户点了 X 什么都没有发生，会以为卡死。
+ */
+let errorShown = false;
+
+/** 3001 被别的后端占着时的统一话术（不得接管别人的后端，见 bootstrap）。 */
+const PORT_BUSY_MESSAGE =
+  '3001 已被占用，可能是上一次残留进程或正在运行的开发服务器（npm run dev）。请结束后重试。';
 /* 桌面壳握手令牌：非开发模式下唯一能打开 3001 的凭证（浏览器没有）。
  * 空串 = 开发模式（vite 在跑），不做门禁。 */
 let shellToken = '';
@@ -403,6 +426,143 @@ function resolveNodeBin() {
   };
 }
 
+/**
+ * 启动序结构化日志（A15 的判定证据）。
+ *
+ * 为什么单独一种格式：错误页截图与「静默接管了别人的后端」截图长得一模一样，
+ * 唯一硬证据是**日志里的次序**。所以这里每条只写「做之前/做之后的客观事实」，
+ * 不写「启动正常」这类结论词 —— 判据是顺序，不是措辞。
+ *
+ * 时间戳由 initFileLogging() 的 tee 统一加（`[ISO] INFO ...`），这里不重复。
+ */
+function logBoot(message) {
+  console.log(`[boot] ${message}`);
+}
+
+/** 后端 stderr 尾部：用来判断退出原因（EADDRINUSE 重试也抢不到端口，不该白等 2 秒）。 */
+let backendStderrTail = '';
+const STDERR_TAIL_LIMIT = 4000;
+
+/**
+ * 构造后端子进程的 env。
+ *
+ * **命名空间黑名单**而不是白名单 —— 白名单（只透传列出来的键）会丢掉
+ * `PATH` / `USERPROFILE` / `TEMP` / `SystemRoot` / `NODE_EXTRA_CA_CERTS`，
+ * 而后端有 8 处按裸名调 `git`、`command-executor` 还要起 `tasklist/docker/kubectl`：
+ * 丢了 `PATH` → `probeTools()` 判 git 不可用 → 克隆/大纲/diff/工单 worktree 全废。
+ * 丢掉企业 TLS 证书变量则是**静默**失败（表现是 fetch failed，不是证书错误）。
+ *
+ * 剔除哪些键：**「声明即剔除」** —— `shellOwned` 既是"本次要写入的集合"，
+ * 也是"要从外部环境里剔除的集合"，同一个对象，结构上不可能漂移。
+ * 不另维护一份键名清单：那是我们踩过三次的失效模式
+ * （版本号三处硬编码 / stage-runtime 依赖清单漏 zod / 两份依赖清单），
+ * 将来加第六个壳拥有的键只需在 `shellOwned` 里写一处。
+ *
+ * 为什么只剔这几个：其余 `DEVWORK_*` 是明文支持的运维开关
+ * （SUPERAGENT / LLM_* / API_KEY / PRICE_PER_*），全剔等于把"用户配了 Key
+ * 却看到未接入模型"这种静默失败换个方向重演一遍。
+ *
+ * @returns {Record<string, string | undefined>}
+ */
+function buildBackendEnv() {
+  /* 壳拥有并钉死的值。注意 DEVWORK_SHELL_TOKEN 是**无条件写入**（可为空串）：
+   * `if (shellToken) ...` 这种条件写入在条件不成立时会放过外部同名变量，
+   * 而空串在 backend（http/shell-gate.ts:32）的语义就是"不开门禁"，写空串是安全的。 */
+  const shellOwned = {
+    DEVWORK_PORT: String(API_PORT),
+    DEVWORK_SHELL_TOKEN: shellToken || '',
+  };
+  /* 打包态：数据目录必须落在程序目录之外（portable 运行期在临时目录，退出即删）。 */
+  if (IS_PACKAGED) {
+    const dataDir = resolveUserDataDir();
+    shellOwned.DEVWORK_DATA_DIR = path.join(dataDir, 'data');
+    shellOwned.DEVWORK_SANDBOX_DIR = path.join(dataDir, 'sandbox');
+    /* 打包态不播种演示数据：库里只有真实接入的资源，没有预置的假资产/假会话。 */
+    shellOwned.DEVWORK_CLEAN = '1';
+    console.log(`[DevWork] 用户数据目录：${dataDir}`);
+  }
+  /* 被外部设置过、又被壳接管的键（只记键名）。 */
+  const dropped = Object.keys(shellOwned).filter((key) => process.env[key] !== undefined);
+
+  /**
+   * 打包态额外**剔除但不代填**的键。
+   *
+   * 为什么不代填：后端会回落到内置默认值（`SCHEMA_PATH` 指向包内 schema.sql），
+   * 这正是我们要的行为。
+   *
+   * 为什么必须剔 `DEVWORK_SCHEMA_PATH`：`database.ts:22` 是
+   * `exec(readFileSync(SCHEMA_PATH))` —— 让环境变量指向任意文件，等于
+   * 「外部文件 → 向用户库执行任意 DDL」。而这个"定制能力"本身并不成立：
+   * 启动期的 `ensureColumn`（表不存在直接 return）/`dropLegacyAccountTables`（DROP 表）/
+   * `ensureFtsTable`/审计 append-only 触发器**全都假设内置 schema 的结构**，
+   * 换一份 schema 得到的不是定制，是**静默残缺的库** + 一堆远离原因的运行时错误。
+   * 企业真要定制 schema，正确做法是出定制包，不是让用户塞环境变量。
+   * 开发态保留（本地调试与迁移实验要用）。
+   */
+  const ignoredInPackaged = IS_PACKAGED ? ['DEVWORK_SCHEMA_PATH'] : [];
+
+  const env = { ...process.env };
+  for (const key of Object.keys(shellOwned)) delete env[key];
+  Object.assign(env, shellOwned);
+  for (const key of ignoredInPackaged) {
+    if (process.env[key] === undefined) continue;
+    delete env[key];
+    /* WARN 级、中性措辞：这是"你的设置被忽略了"，不是错误。 */
+    console.warn(`[boot] env ${key} ignored (打包态固定使用内置 schema，已忽略环境变量)`);
+  }
+
+  /* Electron 专用：子进程是普通 Node，带上这两个变量会改变它的行为
+   * （ELECTRON_RUN_AS_NODE 会让 electron 变成 node；NODE_OPTIONS 里的
+   * --require 钩子是宿主注入的，不应进后端）。 */
+  delete env.ELECTRON_RUN_AS_NODE;
+  delete env.NODE_OPTIONS;
+
+  /* 日志：只记键名，**绝不记值**（DEVWORK_API_KEY 之类可能是真的密钥）。
+   * 「forced」是给验收看的（证明钉死生效），「dropped」把**全部**被壳接管的键
+   * 一次性列出来（逗号分隔），否则"到底哪几个被忽略了"只能靠读代码。 */
+  logBoot(`env DEVWORK_PORT=${API_PORT} forced dropped=${dropped.join(',') || 'none'}`);
+
+  /* 反向也要能自查：透传了哪些 DEVWORK_* 运维开关（同样只记键名）。
+   * 用户说"我设了 Key 却提示未接入模型"时，要能一眼看出这个变量到底有没有到后端。 */
+  const retained = Object.keys(process.env)
+    .filter((key) => key.startsWith('DEVWORK_') && !(key in shellOwned) && !ignoredInPackaged.includes(key))
+    .map((key) => key.slice('DEVWORK_'.length));
+  if (retained.length > 0) {
+    logBoot(`env retained_DEVWORK=${retained.join(',')}`);
+  }
+
+  /* 安全姿态相关的透传键必须留痕：这些"由用户环境决定行为"的开关一旦生效，
+   * 出问题时必须能从日志反推出来。原则：只记键名/是否设置，绝不记值。 */
+  if (env.DEVWORK_BROWSER_ALLOW_PRIVATE === '1') {
+    /* WARN 级，不是 INFO：它改的是**安全姿态**。
+     * 而且"能读到日志的人"与"需要被告知的人"不是同一批 —— 所以除了日志，
+     * 前端设置页还会显示当前状态（数据来自 /api/health 的 browserAllowPrivate 字段）。 */
+    console.warn(
+      '[boot] env DEVWORK_BROWSER_ALLOW_PRIVATE=1 '
+      + '(内网访问已开启：Agent 内置浏览器可访问 127/10/172.16/192.168 与本机无鉴权服务)',
+    );
+  }
+  if (env.DEVWORK_LLM_PROVIDER) {
+    /* provider 名（openai / deepseek 之类）不是秘密，可以直记。 */
+    logBoot(`env DEVWORK_LLM_PROVIDER=${env.DEVWORK_LLM_PROVIDER}`);
+  }
+  if (env.DEVWORK_SCHEMA_PATH) {
+    /* 走到这里只可能是**开发态**（打包态上面已剔除）。
+     * 这个键决定启动时执行哪份 DDL（database.ts 直接 exec 该文件的 SQL），
+     * 只记"被替换了"，不记路径内容（路径可能带用户名，没必要落盘）。 */
+    logBoot('env DEVWORK_SCHEMA_PATH=set (启动期 DDL 使用外部文件)');
+  }
+  /* 密钥只记 set / unset —— 值一旦进日志，是比功能故障更严重的事故。 */
+  logBoot(`env DEVWORK_API_KEY=${process.env.DEVWORK_API_KEY ? 'set' : 'unset'}`);
+
+  /* 运维开关不静默吞：开发者有意关掉影子链路时必须生效，但要在日志里留一句，
+   * 否则「工单永不出现」会被当成 bug 排查半天。 */
+  if (env.DEVWORK_SUPERAGENT === 'off') {
+    logBoot('env DEVWORK_SUPERAGENT=off (影子链路已由环境变量关闭)');
+  }
+  return env;
+}
+
 function spawnBackend() {
   const resolved = resolveNodeBin();
   if (!resolved.bin) {
@@ -417,20 +577,8 @@ function spawnBackend() {
     console.error('[DevWork] 未找到服务端入口，无法启动后端');
     return { ok: false, reason: `打包产物里缺少服务端入口（${SERVER_ENTRY}）` };
   }
-  const env = { ...process.env };
-  delete env.ELECTRON_RUN_AS_NODE;
-  /* 打包态：数据目录必须落在程序目录之外（portable 运行期在临时目录，退出即删）。
-   * 开发态保持默认（<repo>/server/data），不干扰本地开发与测试。 */
-  if (IS_PACKAGED) {
-    const dataDir = resolveUserDataDir();
-    env.DEVWORK_DATA_DIR = path.join(dataDir, 'data');
-    env.DEVWORK_SANDBOX_DIR = path.join(dataDir, 'sandbox');
-    console.log(`[DevWork] 用户数据目录：${dataDir}`);
-  }
-  /* 打包态不播种演示数据：库里只有真实接入的资源，没有预置的假资产/假会话。 */
-  if (IS_PACKAGED) env.DEVWORK_CLEAN = '1';
-  /* 桌面壳握手令牌：让后端启用浏览器直连门禁（非开发模式才设）。 */
-  if (shellToken) env.DEVWORK_SHELL_TOKEN = shellToken;
+  const env = buildBackendEnv();
+  backendStderrTail = '';
   // 后端凭据前端永不可见；此处只传运行时路径，不注入任何模型 Key。
   backendChild = spawn(resolved.bin, [
     '--require', TSX_PREFLIGHT,
@@ -445,14 +593,55 @@ function spawnBackend() {
     // 通道直达服务本尊：Electron 横死时后端能立即收到 disconnect 自清理。
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
+  logBoot(`spawn pid=${backendChild.pid} port=${API_PORT}`);
   backendChild.stdout.on('data', (chunk) => {
     process.stdout.write(`[backend] ${chunk.toString('utf8')}`);
-  });  backendChild.stderr.on('data', (chunk) => {
-    process.stderr.write(`[backend] ${chunk.toString('utf8')}`);
   });
-  backendChild.on('exit', (code) => {
-    console.log(`[DevWork] 后端进程退出 code=${code}`);
+  backendChild.stderr.on('data', (chunk) => {
+    const text = chunk.toString('utf8');
+    process.stderr.write(`[backend] ${text}`);
+    /* 留尾部用于判退出原因：EADDRINUSE 时重启一次也抢不到端口，
+     * 白等 2 秒只会让用户多盯 2 秒空窗。 */
+    backendStderrTail = (backendStderrTail + text).slice(-STDERR_TAIL_LIMIT);
+  });
+  /* 后端异常退出必须有人管（A-P1-02）。
+   *
+   * 后端的异常策略是 `uncaughtException → process.exit(1)`（不再吞掉继续跑），
+   * 所以这里**是唯一的恢复点**，必须区分三种退出：
+   *   normal       正常关停（shuttingDown）→ 什么都不做
+   *   eaddrinuse   端口被抢 → 重试也抢不到，直接错误页（不从"自动重启一次"白等）
+   *   crash        其他异常 → 退避 2s 自动重启**一次**，再失败切错误页
+   * 重启成功由 retryBackend() 负责把窗口重新 loadURL(appUrl())，否则用户看到的
+   * 还是上一张错误页。 */
+  backendChild.on('exit', (code, signal) => {
+    const pid = backendChild ? backendChild.pid : -1;
     backendChild = null;
+    const eaddrinuse = /EADDRINUSE/i.test(backendStderrTail);
+    if (shuttingDown) {
+      logBoot(`backend-exit pid=${pid} code=${code} signal=${signal} restart=0 reason=normal`);
+      return;
+    }
+    const reason = eaddrinuse ? 'eaddrinuse' : 'crash';
+    const willRestart = !eaddrinuse && restartCount < 1;
+    logBoot(`backend-exit pid=${pid} code=${code} signal=${signal} restart=${willRestart ? 1 : 0} reason=${reason}`);
+    if (eaddrinuse) {
+      showErrorPage(PORT_BUSY_MESSAGE, { reason: 'port-occupied' });
+      return;
+    }
+    if (!willRestart) {
+      showErrorPage(
+        '后端进程异常退出，已自动重启一次仍未恢复。'
+        + '请点「重试」，或查看日志目录中的后端输出定位原因。',
+        { reason: 'backend-down' },
+      );
+      return;
+    }
+    restartCount += 1;
+    console.log('[DevWork] 后端异常退出，2 秒后自动重启（只有一次自动重启机会）');
+    restartTimer = setTimeout(() => {
+      restartTimer = null;
+      void retryBackend();
+    }, 2000);
   });
   console.log(`[DevWork] 后端已 spawn · nodeTier=${resolved.tier} · source=${resolved.source} · bin=${resolved.bin}`);
   attachSecretIpc(backendChild);
@@ -604,21 +793,139 @@ function killBackend(done) {
 function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
+  /* 关停时把退避重启的定时器踢掉：否则关窗 2 秒后还会冒出一个后端进程，
+   * 抱着 3001 变成孤儿（下次启动就报"端口被占用"）。 */
+  if (restartTimer) {
+    clearTimeout(restartTimer);
+    restartTimer = null;
+  }
   killBackend(() => app.exit(0));
 }
 
-function errorPage(message) {
+/**
+ * 启动失败页。
+ *
+ * @param {string} message 给用户看的一句话（不允许出现堆栈，堆栈进日志）
+ * @param {{ retry?: boolean }} [options] retry=true 时带「重试」按钮
+ *
+ * 为什么按钮要兜两层：
+ * ① 正常情况走 preload 暴露的 `desktop.restartBackend()`（IPC → 主进程）；
+ * ② 万一 preload 桥没跑到（sandbox / 加载时序），退回一次导航到 `devwork://retry`，
+ *    由主进程的 will-navigate 拦住处理 —— 否则错误页就成了一块点不动的石头。
+ */
+function errorPage(message, options = {}) {
+  const withRetry = options.retry === true;
   return [
     '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>DevWork 启动失败</title>',
     '<style>body{font-family:system-ui,"Microsoft YaHei",sans-serif;background:#FAFAF9;color:#232320;',
     'display:grid;place-items:center;height:100vh;margin:0}h2{font-weight:500}p{color:#6B6B66;',
-    'font-size:13px;line-height:1.8;max-width:520px}</style></head><body><div>',
-    '<h2>后端服务未就绪</h2><p>',
+    'font-size:13px;line-height:1.8;max-width:520px}button{margin-top:18px;padding:7px 18px;',
+    'font-size:13px;border:1px solid #D8D8D2;border-radius:6px;background:#fff;color:#232320;',
+    'cursor:pointer}button:disabled{color:#9A9A94;cursor:default}</style></head><body><div>',
+    '<h2>DevWork 启动失败</h2><p>',
     String(message).replace(/[<>&]/g, ''),
     '</p><p>本程序已内置 Node 运行时，正常情况下无需任何额外环境。',
     '若仍无法启动，请查看日志目录中的后端输出，或在开发态执行 <code>npm run dev</code> 查看完整日志。</p>',
+    withRetry
+      ? '<button id="retry" type="button">重试</button><script>'
+        + 'document.getElementById("retry").addEventListener("click",function(){'
+        + 'this.disabled=true;this.textContent="正在重试…";'
+        + 'if(window.desktop&&typeof window.desktop.restartBackend==="function"){'
+        + 'window.desktop.restartBackend();}else{location.href="devwork://retry";}});'
+        + '</script>'
+      : '',
     '</div></body></html>',
   ].join('');
+}
+
+/**
+ * 把主窗口切到错误页（窗口不在就建一个，不加载真实页面）。
+ *
+ * 注意 loadURL 用 data: 协议：此刻后端不可用，任何 127.0.0.1 的地址都只会得到
+ * ERR_CONNECTION_REFUSED 的白屏。
+ *
+ * @param {string} message 给用户看的一句话
+ * @param {{ retry?: boolean, reason?: string }} [options]
+ *        reason 只进日志（port-occupied / backend-down / timeout），用来让 A15
+ *        能凭日志判定「停在错误页」这件事，而不是靠人看截图。
+ */
+function showErrorPage(message, options = { retry: true }) {
+  errorShown = true;
+  logBoot(`error-page reason=${options.reason ?? 'unknown'}`);
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createMainWindow({ skipLoad: true });
+  const html = errorPage(message, options);
+  void win.webContents.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  return win;
+}
+
+/** 后端就绪后把窗口切回真实页面（错误页 → 首屏）。 */
+function reloadMainWindow() {
+  errorShown = false;
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createMainWindow({ skipLoad: true });
+  void win.loadURL(appUrl());
+}
+
+/**
+ * 等后端就绪并记两行日志（开始 / 结果）。
+ *
+ * 拆成「attach 开始」与「attach 结果」两条，而不是一条结论行：
+ * A15 要判的是「probe → spawn → attach」的**顺序**，合并成一行就判不出来了。
+ *
+ * @param {number} attempt 第几次尝试（1 起）
+ * @param {number} timeoutMs 等待上限
+ */
+async function attachBackend(attempt, timeoutMs) {
+  logBoot(`attach url=http://127.0.0.1:${API_PORT} attempt=${attempt}`);
+  const healthy = await waitForBackend(timeoutMs);
+  logBoot(`attach attempt=${attempt} result=${healthy ? 'ok' : 'timeout'}`);
+  return healthy;
+}
+
+/**
+ * 重试启动后端（错误页「重试」按钮与自动重启共用这一条路径）。
+ *
+ * 三条分支都必须有明确出口，不允许"什么都不做"：
+ *   ① 我们自己还有后端进程在跑 → 只等它（首启慢的机器上 waitForBackend 会先超时）；
+ *   ② 我们没有后端进程，但 3001 已被别人占着 → 报占用，**不接管**（会读到别人的数据目录）；
+ *   ③ 端口空闲 → spawn 一个新后端并等待。
+ *
+ * @returns {Promise<boolean>} 是否恢复到可用状态
+ */
+async function retryBackend() {
+  logBoot('retry requested');
+  if (shuttingDown) return false;
+  /* 用真探活而不是问 backendChild：进程可能还活着但已经不会响应了。 */
+  const owned = backendChild !== null && backendChild.exitCode === null;
+
+  if (!owned) {
+    if (await probe(API_PORT, '/api/health')) {
+      logBoot(`probe port=${API_PORT} result=occupied`);
+      console.log('[DevWork] 重试失败：3001 已被占用（不接管他人后端）');
+      showErrorPage(PORT_BUSY_MESSAGE, { reason: 'port-occupied' });
+      return false;
+    }
+    logBoot(`probe port=${API_PORT} result=free`);
+    const spawned = spawnBackend();
+    if (!spawned.ok) {
+      showErrorPage(spawned.reason, { reason: 'backend-down' });
+      return false;
+    }
+  }
+
+  const healthy = await attachBackend(restartCount + 1, 20000);
+  if (!healthy) {
+    showErrorPage(
+      '20 秒内仍未探测到 127.0.0.1:3001/api/health。'
+      + '后端可能仍在初始化（大库首次迁移较慢），可以再点一次「重试」。',
+      { reason: 'timeout' },
+    );
+    return false;
+  }
+  /* 恢复成功：把自动重启预算还回来，下次再崩还能自动救一次。 */
+  restartCount = 0;
+  reloadMainWindow();
+  console.log('[DevWork] 后端已恢复，主窗口已重新加载');
+  return true;
 }
 
 /**
@@ -654,6 +961,14 @@ function wireCommon(win) {
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
     return { action: 'deny' };
+  });
+  /* 错误页的重试兜底：preload 桥不可用时，页面退化成导航到 devwork://retry。
+   * 这个协议没有注册处理器，不拦住会变成 ERR_UNKNOWN_URL_SCHEME 的白屏。 */
+  win.webContents.on('will-navigate', (event, url) => {
+    if (typeof url === 'string' && url.startsWith('devwork://retry')) {
+      event.preventDefault();
+      void retryBackend();
+    }
   });
   win.webContents.on('devtools-opened', () => {
     if (!win.isDestroyed()) win.webContents.send('dev:devtools-changed', true);
@@ -703,9 +1018,15 @@ function createMainWindow(options = {}) {
   win.on('unmaximize', () => {
     if (!win.isDestroyed()) win.webContents.send('win:maximize-changed', false);
   });
-  /* g3：拦截关闭 → 现查设置决定「最小化到托盘」还是「退出应用」。 */
+  /* g3：拦截关闭 → 现查设置决定「最小化到托盘」还是「退出应用」。
+   * 错误页例外：那时后端不可用，最小化到托盘等于让用户以为程序卡死。 */
   win.on('close', (event) => {
     if (shuttingDown || forceClose) return;
+    if (errorShown) {
+      event.preventDefault();
+      shutdown();
+      return;
+    }
     event.preventDefault();
     void fetchCloseAction().then((action) => {
       if (action === 'exit') {
@@ -765,6 +1086,10 @@ function registerIpc() {
     chrome: process.versions.chrome,
   }));
   ipcMain.handle('app:api-base', () => '/api');
+  /* 错误页「重试」：重新探活 / 必要时重启后端，就绪后把窗口切回真实页面。
+   * 返回 true 表示已恢复，渲染进程据此决定要不要再亮着按钮（错误页是静态页，
+   * 这里主要是给 preload 一个可 await 的语义）。 */
+  ipcMain.handle('app:restart-backend', () => retryBackend());
   /* 系统日志目录的真实路径：设置页要如实显示，不能写死平台路径。 */
   ipcMain.handle('app:logs-path', () => app.getPath('logs'));
   /* 打包态标志：前端据此关闭 mock 降级（打包产物不应展示演示数据）。 */
@@ -902,11 +1227,15 @@ async function bootstrap() {
     isDev = false;
   } else {
     isDev = await probe(VITE_PORT, '/');
-    healthy = await probe(API_PORT, '/api/health');
+    logBoot(`probe dev-port=${VITE_PORT} result=${isDev ? 'occupied' : 'free'}`);
   }
 
   /* 非开发模式：认领桌面壳令牌，网络层自动给 3001 请求注入 X-DevWork-Token。
-   * 渲染进程 fetch 走 session 网络栈，用户无感；开发模式不做门禁也无需令牌。 */
+   * 渲染进程 fetch 走 session 网络栈，用户无感；开发模式不做门禁也无需令牌。
+   *
+   * 这一步必须在**任何 spawn 之前**：端口被占用的分支会直接 return，
+   * 之后用户点「重试」时由 retryBackend() 再起后端 —— 那时令牌必须已经认领好，
+   * 否则重试起来的后端不带 DEVWORK_SHELL_TOKEN，等于把浏览器直连门禁关掉了。 */
   if (!isDev) {
     shellToken = ensureShellToken();
     session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
@@ -917,29 +1246,57 @@ async function bootstrap() {
     });
   }
 
+  if (IS_PACKAGED) {
+    /* A-P1-01：spawn **之前**先探活。
+     *
+     * 若 3001 上已经有别人的后端（上一次崩溃的残留 / 正在跑的 npm run dev），
+     * 我们 spawn 的后端会 EADDRINUSE 立刻退出，而 waitForBackend 探到的却是
+     * **别人**的 /api/health → 200 → 窗口正常打开、读的是别人的数据目录
+     * （很可能就是 backend/.runtime 里的开发库）。
+     * 所以这里的处置是：如实报占用，**不 spawn、不接管**。
+     * 判「端口上是否有人」用 /api/health 而不是 TCP connect：3001 上空进程
+     * 与真后端对用户的含义完全不同，只有真后端才值得报"被占用"。
+     *
+     * 注意这条**不会挡死正常启动**：判定发生在「自己 spawn 之前」，
+     * 端口空闲就照常 spawn；只有"我们还没起后端、端口上却已经有人应答"才报错。
+     * 日志里 probe → spawn → attach 三行分离，就是为了让 A15 能证明这个次序。 */
+    const occupied = await probe(API_PORT, '/api/health');
+    logBoot(`probe port=${API_PORT} result=${occupied ? 'occupied' : 'free'}`);
+    if (occupied) {
+      console.log('[DevWork] 3001 被占用，拒绝启动后端（不接管他人服务）');
+      showErrorPage(PORT_BUSY_MESSAGE, { reason: 'port-occupied' });
+      return;
+    }
+  } else {
+    healthy = await probe(API_PORT, '/api/health');
+    logBoot(`probe port=${API_PORT} result=${healthy ? 'occupied' : 'free'}`);
+  }
+
   if (!healthy && !isDev) {
     const spawned = spawnBackend();
     if (!spawned.ok) {
-      /* 后端起不来时给一个"大窗"报错页：这不是登录窗口，读起来需要空间。 */
-      const win = createMainWindow({ skipLoad: true });
-      void win.webContents.loadURL(
-        `data:text/html;charset=utf-8,${encodeURIComponent(errorPage(spawned.reason))}`,
-      );
+      /* 后端起不来时给一个"大窗"报错页：这不是登录窗口，读起来需要空间。
+       * 带「重试」：spawn 失败常见于杀软临时拦截 / 包被拷到只读目录，
+       * 换个条件再点一次就可能成功，没必要强制重启程序。 */
+      showErrorPage(spawned.reason, { reason: 'backend-down' });
       return;
     }
-    healthy = await waitForBackend(15000);
+    healthy = await attachBackend(1, 15000);
   }
 
   /* 启动即创建主窗口（纯本地工具，无登录门禁）。 */
   createMainWindow();
   console.log(`[DevWork] mainPid=${process.pid} · dev=${isDev} · window=main ${MAIN_SIZE.width}x${MAIN_SIZE.height} frameless`);
   if (!healthy) {
-    void mainWindow.webContents.loadURL(
-      `data:text/html;charset=utf-8,${encodeURIComponent(errorPage(
-        '15 秒内未探测到 127.0.0.1:3001/api/health。'
-        + '若本机正在运行 npm run dev，请先关闭 —— 开发服务器会占用 3001，'
-        + '打包版的后端就起不来。',
-      ))}`,
+    /* A-P1-10：超时不再是一次性死页面。
+     * 首启要建库、建种子、跑索引（全是同步 IO），慢机器上 15s 确实不够；
+     * 原来超时后即使后端 3 秒后就绪，窗口也永远停在错误页，只能重启程序。
+     * 现在给「重试」，主进程收到后重新探活（后端其实已经在跑就直接进首屏）。 */
+    showErrorPage(
+      '15 秒内未探测到 127.0.0.1:3001/api/health。'
+      + '首次启动要建库、建索引，机器较慢时可能超过 15 秒 —— 稍等一下点「重试」即可。'
+      + '若本机正在运行 npm run dev，请先关闭：开发服务器会占用 3001，打包版的后端就起不来。',
+      { reason: 'timeout' },
     );
   }
 

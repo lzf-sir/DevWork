@@ -98,7 +98,6 @@ import type {
   ShadowStats,
   ShadowStatus,
   ShadowTrigger,
-  ShadowScheduleConfig,
 } from './types';
 
 import { mockFallthrough } from './mock';
@@ -551,12 +550,17 @@ export const api: ApiClient = {
       { timeoutMs: 16000 },
     ),
 
-  /* ---- 文件 / 编辑器 ---- */
-  getFileTree: (assetId: string) => request<FileNode[]>('GET', `/assets/${enc(assetId)}/files/tree`),
+  /* ---- 文件 / 编辑器 ----
+   * 这三个必须显式放宽到 20s：后端要同步遍历整仓（fileTree 有深度/条数上限，
+   * outline 还要逐文件扫引用，repoStatus 每次 countFiles 都 walk 一遍），
+   * 用默认 2.5s 打它们必然超时 → 前端拿不到数据、降级成 mock/空态。
+   * 只放宽超时解决"看起来没数据"，不掩盖后端的阻塞问题（那是后端侧的事）。 */
+  getFileTree: (assetId: string) =>
+    request<FileNode[]>('GET', `/assets/${enc(assetId)}/files/tree`, undefined, { timeoutMs: 20000 }),
   getFileContent: (assetId: string, path: string) =>
     request<FileContent>('GET', `/assets/${enc(assetId)}/files/content${qs({ path })}`),
   getFileOutline: (assetId: string, path: string) =>
-    request<FileOutline>('GET', `/assets/${enc(assetId)}/files/outline${qs({ path })}`),
+    request<FileOutline>('GET', `/assets/${enc(assetId)}/files/outline${qs({ path })}`, undefined, { timeoutMs: 20000 }),
   getFileDiff: (assetId: string, path: string) =>
     request<FileDiff>('GET', `/assets/${enc(assetId)}/files/diff${qs({ path })}`),
   saveFile: (assetId: string, input: SaveFileInput) =>
@@ -568,7 +572,9 @@ export const api: ApiClient = {
   getGitSummary: (assetId: string) => request<GitSummary>('GET', `/assets/${enc(assetId)}/files/git`),
 
   /* ---- 本地工作区仓库（代码库 = 克隆到本地） ---- */
-  getRepoStatus: (assetId: string) => request<RepoStatus>('GET', `/assets/${enc(assetId)}/repo`),
+  /* repoStatus 每次都要 countFiles（全量 walk，上限 20000）——默认 2.5s 不够。 */
+  getRepoStatus: (assetId: string) =>
+    request<RepoStatus>('GET', `/assets/${enc(assetId)}/repo`, undefined, { timeoutMs: 20000 }),
   cloneRepo: (assetId: string, input: CloneRepoInput) =>
     request<CloneRepoResult>('POST', `/assets/${enc(assetId)}/clone`, input, { timeoutMs: 320000 }),
   ensureWorkspaceDir: (workspaceId: string) =>

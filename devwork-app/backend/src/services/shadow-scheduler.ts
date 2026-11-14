@@ -14,8 +14,9 @@
  *
  * 关停开关：DEVWORK_SUPERAGENT=off —— 一键回到旧链路，不删表、不改数据。
  */
-import { all, get, newId, nowIso, run, writeAudit } from '../db/database';
+import { AUDIT_GLOBAL_SCOPE, all, get, newId, nowIso, run, writeAudit } from '../db/database';
 import { settingRaw } from '../db/repositories';
+import { DEFAULT_WORKSPACE_ID } from '../config';
 import {
   DEFAULT_POLICY,
   gate,
@@ -170,9 +171,23 @@ export function fireSourceNow(kind: SourceKind): IngestResult | null {
   return emitScheduledTrigger(row, new Date().toISOString());
 }
 
+/**
+ * 取「这个工作区的这个源」那一行。
+ *
+ * 以前写的是 `UPDATE … WHERE kind = ?` 配 `SELECT … ORDER BY created_at LIMIT 1`：
+ * 写操作改了**全部**工作区的同名源，读回来的却只有第一个 —— 两个工作区各有一份
+ * schedule 源时，改 A 的巡检时间会把 B 的开关一起关掉（审计 A-P2-07）。
+ * 未带 workspaceId 的旧调用退回「最早的那一行」且只改这一行，不再波及所有工作区。
+ */
+function sourceRowOf(kind: SourceKind, workspaceId?: string): Row | undefined {
+  return workspaceId
+    ? get<Row>('SELECT * FROM source WHERE kind = ? AND workspace_id = ? ORDER BY created_at LIMIT 1', kind, workspaceId)
+    : get<Row>('SELECT * FROM source WHERE kind = ? ORDER BY created_at LIMIT 1', kind);
+}
+
 /** 改源配置（目前只服务 schedule）。改完立刻按新配置重排下次触发。 */
-export function updateSourceConfig(kind: SourceKind, patch: ScheduleConfig): Row | null {
-  const row = get<Row>('SELECT * FROM source WHERE kind = ? ORDER BY created_at LIMIT 1', kind);
+export function updateSourceConfig(kind: SourceKind, patch: ScheduleConfig, workspaceId = ''): Row | null {
+  const row = sourceRowOf(kind, workspaceId || undefined);
   if (!row) return null;
   const merged = { ...rawConfigOf(row), ...patch };
   run('UPDATE source SET config = ? WHERE id = ?', JSON.stringify(merged), String(row.id));
@@ -216,6 +231,8 @@ export function setSuperagentEnabled(enabled: boolean): boolean {
   }
   enabledCache = { value: enabled, at: Date.now() };
   writeAudit({
+    /* 总开关是全局配置，归属如实记为 global（不再伪装成 w-ops）。 */
+    workspaceId: AUDIT_GLOBAL_SCOPE,
     actor: '用户', source: 'user',
     action: 'superagent.toggle', target: '影子链路',
     result: enabled ? '放行' : '拦截', severity: enabled ? 'info' : 'warn',
@@ -340,7 +357,7 @@ export function saveShadowPolicy(patch: Partial<ShadowPolicy>): ShadowPolicy {
 
 function defaultWorkspaceId(): string {
   const row = get<Row>('SELECT id FROM workspace ORDER BY created_at ASC LIMIT 1');
-  return String(row?.id ?? 'w-ops');
+  return String(row?.id ?? DEFAULT_WORKSPACE_ID);
 }
 
 /** 幂等播种七类源（结构性配置，不是演示数据）。 */
@@ -655,7 +672,18 @@ export function maybeAutoIssue(mandateId: string, policy: ShadowPolicy): { issue
     `${AUTO_NOTE_PREFIX}${policy.policyVersion} · 风险≤${scope.riskCeiling} · 写 ${scope.maxWrites} 次`,
     mandateId,
   );
+  /* 审计归属沿 decision → trigger → thread 回溯到真实工作区
+   * （mandate / trigger 表本身不带 workspace_id，thread 才是归属载体）。 */
+  const owner = get<{ workspace_id: string }>(
+    `SELECT th.workspace_id AS workspace_id FROM mandate m
+       JOIN decision d ON d.id = m.decision_id
+       JOIN trigger t ON t.id = d.trigger_id
+       JOIN thread th ON th.id = t.thread_id
+     WHERE m.id = ?`,
+    mandateId,
+  );
   writeAudit({
+    workspaceId: String(owner?.workspace_id ?? AUDIT_GLOBAL_SCOPE),
     actor: '系统', source: 'system',
     action: 'superagent.mandate.auto', target: `mandate:${mandateId}`,
     result: '放行', severity: 'warn',
@@ -820,6 +848,8 @@ export function startShadowScheduler(): { started: boolean; reason: string } {
   timer.unref();
   void tickOnce();
   writeAudit({
+    /* 启动是进程级事件，不属于任何一个工作区。 */
+    workspaceId: AUDIT_GLOBAL_SCOPE,
     actor: '系统', source: 'system',
     action: 'superagent.shadow.start', target: '影子链路',
     result: '成功', severity: 'info',
@@ -1162,13 +1192,15 @@ export function shadowStatus(): Row {
 }
 
 /** 事件源开关（P1 只允许改 user / terminal 两类，主动源留给 P3 再开）。 */
-export function setSourceEnabled(kind: SourceKind, enabled: boolean): number {
-  const changed = run('UPDATE source SET enabled = ? WHERE kind = ?', enabled ? 1 : 0, kind);
+export function setSourceEnabled(kind: SourceKind, enabled: boolean, workspaceId = ''): number {
+  /* 只动「一个工作区的一行」：按 kind 批量 UPDATE 会跨工作区串开关。 */
+  const row = sourceRowOf(kind, workspaceId || undefined);
+  if (!row) return 0;
+  const changed = run('UPDATE source SET enabled = ? WHERE id = ?', enabled ? 1 : 0, String(row.id));
   /* 定时源启用时重排下一次：停在「三天前该跑」的时刻会让它一打开就补发，
    * 而人的预期是「打开之后从下一次开始」。重启要补发，手动开关不补发。 */
   if (changed > 0 && enabled && kind === 'schedule') {
-    const row = get<Row>("SELECT * FROM source WHERE kind = 'schedule' ORDER BY created_at LIMIT 1");
-    if (row) advanceSchedule(row, new Date());
+    advanceSchedule(row, new Date());
   }
   return changed;
 }

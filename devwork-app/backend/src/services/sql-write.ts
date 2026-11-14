@@ -113,12 +113,44 @@ export function precheckDml(raw: string): string {
   return scan.execStatement;
 }
 
-/** 备份 demo 库（整文件拷贝）。 */
+/** 备份保留份数：够回滚最近若干次即可，不保留全历史。 */
+const BACKUP_KEEP = 20;
+
+/**
+ * 只保留最近 N 份备份（按 mtime 从新到旧）。
+ *
+ * 每次 DML 都整库拷贝一份，却从来没有清理 —— 用户连续改 500 次，磁盘上就是
+ * 500 个 demo.sqlite。1.0 只需要「有界」：留 20 份足够覆盖「改错了要退回去」的实际窗口。
+ */
+function pruneBackups(backupDir: string, keep: number): void {
+  try {
+    const files = fs.readdirSync(backupDir)
+      .filter((name) => name.startsWith('demo-') && name.endsWith('.sqlite'))
+      .map((name) => {
+        const absolute = path.join(backupDir, name);
+        try {
+          return { absolute, mtime: fs.statSync(absolute).mtimeMs };
+        } catch {
+          return { absolute, mtime: 0 };
+        }
+      })
+      /* 新的排前面；mtime 相同（同一毫秒）时按文件名倒序，保证顺序稳定。 */
+      .sort((left, right) => right.mtime - left.mtime || right.absolute.localeCompare(left.absolute));
+    files.slice(Math.max(1, keep)).forEach((file) => {
+      try { fs.unlinkSync(file.absolute); } catch { /* 删不掉不阻断写入 */ }
+    });
+  } catch {
+    /* 清理失败不影响本次备份 / 写入 */
+  }
+}
+
+/** 备份 demo 库（整文件拷贝）+ 有界保留。 */
 function backupDemoDb(): string {
   const backupDir = path.join(DATA_DIR, 'backups');
   fs.mkdirSync(backupDir, { recursive: true });
   const backupPath = path.join(backupDir, `demo-${Date.now()}.sqlite`);
   fs.copyFileSync(DEMO_DB_PATH, backupPath);
+  pruneBackups(backupDir, BACKUP_KEEP);
   return backupPath;
 }
 

@@ -76,13 +76,19 @@ export async function waitForHttp(url, timeoutMs = 30000, intervalMs = 500) {
 }
 
 /**
- * 前置门禁：Node 版本 + 依赖是否装好。
+ * 环境门禁：Node 版本 + 依赖是否装好。
+ *
+ * **注意别和发布静态门禁混淆**：那个是 `scripts/preflight-release.mjs`
+ * （版本单源 / 运行时依赖 / 契约导入扫描），面向"能不能发版"；
+ * 这个函数只回答"这台机器能不能跑起来"：Node 够不够新、`node_modules` 装没装。
+ * 函数名要能自证职责，所以叫 `checkEnvDeps` 而不是 `preflight` ——
+ * 后者会让读 `package.mjs` 的人误以为发布门禁已经在流水线里了。
  *
  * Node 版本是硬门槛：后端用 node:sqlite（Node 22.5+ 才有），
  * 低版本会在启动时抛 "Cannot find module 'node:sqlite'"，与其到时候看堆栈，
  * 不如在这里一句话说清。
  */
-export function preflight(root, { requireNode = 22, autoInstall = true } = {}) {
+export function checkEnvDeps(root, { requireNode = 22, autoInstall = true } = {}) {
   const major = Number(process.versions.node.split('.')[0]);
   if (major < requireNode) {
     fail(`需要 Node ${requireNode} 及以上（后端依赖 node:sqlite），当前是 ${process.versions.node}`);

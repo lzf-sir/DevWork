@@ -81,6 +81,8 @@ export function registerTicketRoutes(app: Express): void {
     const result = answerAttention(String(req.params.id), payload.attentionId, payload.answer);
     if (!result.ok) throw new ApiFailure('E_VALIDATION', result.message);
     writeAudit({
+      /* 归属从工单推导：工单属于某个工作区，审计不该挂在默认值上。 */
+      workspaceId: String(getTicket(String(req.params.id))?.workspaceId ?? ''),
       actor: identity(req).name, source: 'user',
       action: 'ticket.answer', target: `ticket:${String(req.params.id)}`,
       result: '成功', severity: 'info', detail: payload.answer.slice(0, 200),

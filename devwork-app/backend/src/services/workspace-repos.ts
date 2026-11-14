@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { SANDBOX_DIR } from '../config';
-import { get, run, nowIso } from '../db/database';
+import { get, run, nowIso, writeAudit } from '../db/database';
 import { REPO_ROOT } from '../sandbox/bootstrap';
 import { ApiFailure } from '../http/core';
 import { repoRootOverride, isolationRequired } from './exec-context';
@@ -88,10 +88,32 @@ export function saveRepoConfig(assetId: string, patch: RepoConfig): RepoConfig {
   return next;
 }
 
-/** 资产所属工作区。 */
+/**
+ * 资产所属工作区（查不到返回空串，由调用方显式拒绝）。
+ *
+ * **仅用于路径解析**（当前只有 `resolveRepoRoot()` / `cloneRepository()` 两处调用）。
+ * 审计归属一律用 `resolveWorkspaceIdForAsset()`：那个函数查不到返回 null，
+ * 让调用点显式降级成 `''` + `workspace:unknown` 或 `AUDIT_GLOBAL_SCOPE`，
+ * 不会把审计挂到一个"看起来存在"的默认工作区名下。
+ */
 export function assetWorkspaceId(assetId: string): string {
   const row = get<{ workspace_id: string }>('SELECT workspace_id FROM asset WHERE id = ?', assetId);
-  return String(row?.workspace_id ?? 'w-ops');
+  return String(row?.workspace_id ?? '');
+}
+
+/**
+ * 资产的真实工作区归属；**查不到就返回 null**（绝不带缺省值）。
+ *
+ * 为什么单独一个函数：`assetWorkspaceId()` 查不到会给空串，拿它去填审计
+ * 等于把硬编码搬个位置 —— 资产被删之后，那条审计仍然会被记到默认工作区名下，
+ * 「按工作区筛审计」看到的还是错的。审计要求「不知道就说不认识」，
+ * 所以这里宁可返回 null，由调用点显式降级成 `''` + `workspace:unknown`。
+ */
+export function resolveWorkspaceIdForAsset(assetId: string): string | null {
+  if (assetId === '') return null;
+  const row = get<{ workspace_id: string }>('SELECT workspace_id FROM asset WHERE id = ?', assetId);
+  const value = String(row?.workspace_id ?? '');
+  return value === '' ? null : value;
 }
 
 /**
@@ -120,7 +142,10 @@ export function resolveRepoRoot(assetId: string): string {
   }
 
   const config = repoConfigOf(assetId);
+  /* assetWorkspaceId 查不到资产会给空串：这里必须显式拒绝，
+   * 否则 wsRoot 会退化成 workspaces/ 根目录，越界校验形同虚设。 */
   const workspaceId = assetWorkspaceId(assetId);
+  if (workspaceId === '') throw new ApiFailure('E_NOT_FOUND', `资产不存在：${assetId}`);
   if (!config.localPath) return REPO_ROOT;
 
   const absolute = path.resolve(WORKSPACES_ROOT, config.localPath);
@@ -144,19 +169,48 @@ export function tryResolveRepoRoot(assetId: string): string {
   }
 }
 
-/** 把 https URL 里的 token 注入进去（私有仓库），返回带凭据的 URL。
- *  凭据只在内存里拼一次，不落 config、不进审计明细。 */
-function withToken(rawUrl: string, token?: string): string {
-  if (!token) return rawUrl;
-  if (!/^https?:\/\//i.test(rawUrl)) return rawUrl;
+/**
+ * 去掉 URL 里的凭据部分（`.git/config` 只存这个）。
+ *
+ * 用户填的远端地址里可能自带 `user:password@`；不管 token 还是用户自己的密码，
+ * 都**不应该**被写进 `.git/config` 长期留在磁盘上。
+ */
+export function stripCredentials(rawUrl: string): string {
   try {
     const parsed = new URL(rawUrl);
-    parsed.username = token;
+    parsed.username = '';
     parsed.password = '';
     return parsed.toString();
   } catch {
-    return rawUrl;
+    return String(rawUrl).replace(/\/\/[^@/]+@/, '//');
   }
+}
+
+/**
+ * 为一次 git 网络调用生成 Authorization 头（**只在参数里用，不落盘**）。
+ *
+ * 形状的选择有代价，先说清楚为什么不用「把 token 拼进 URL」：
+ * 那样 git 会把它原样写进 `.git/config`；而克隆完再 set-url 成脱敏地址，
+ * 下一次 fetch 就没凭据了 —— 私有仓库 pull 直接坏，且本仓库的
+ * `test:repo` 走本地/公开仓库**测不出来**，会一路绿到用户手里。
+ *
+ * 现在：config 存脱敏地址，凭据每次通过 `-c http.extraheader=...` 带在命令行参数上，
+ * 用完即弃（不进进程列表之外的任何持久化介质）。
+ * token 放 username 位、密码留空 —— GitHub / GitLab / Gitea 三家的 basic 都认这个形状。
+ */
+function authHeaderOf(rawUrl: string, token?: string): string {
+  const encode = (user: string, password: string): string =>
+    `Authorization: Basic ${Buffer.from(`${user}:${password}`).toString('base64')}`;
+  if (token) return encode(token, '');
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.username || parsed.password) {
+      return encode(decodeURIComponent(parsed.username), decodeURIComponent(parsed.password));
+    }
+  } catch {
+    /* 非标准 URL（git@host:org/repo）：本来就不带 http 凭据 */
+  }
+  return '';
 }
 
 /** 脱敏后的远端地址：写配置 / 审计用，绝不含 token。 */
@@ -168,6 +222,22 @@ export function redactUrl(rawUrl: string): string {
     return parsed.toString();
   } catch {
     return String(rawUrl).replace(/\/\/[^@/]+@/, '//***@');
+  }
+}
+
+/**
+ * 把 origin 写成**不含任何凭据**的地址。
+ *
+ * 凭据不再经过 `.git/config`：每次需要凭据的 git 调用用 `-c http.extraheader=`
+ * 在参数里带（见 authHeaderOf）。所以这里要做的只是「确保 config 里没有凭据」，
+ * 而且这一步失败也不能让克隆算失败 —— 由调用方记降级审计。
+ */
+function writeCleanOrigin(target: string, rawUrl: string): boolean {
+  try {
+    git(target, ['remote', 'set-url', 'origin', stripCredentials(rawUrl)]);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -198,12 +268,31 @@ export interface CloneResult {
   remote: string;
 }
 
-/** 在指定目录执行 git 命令，返回标准输出；失败时抛出带 stderr 的错误。 */
-function git(cwd: string, args: string[], timeout = 20000): string {
+/**
+ * 在指定目录执行 git 命令，返回标准输出；失败时抛出带 stderr 的错误。
+ *
+ * `authHeader` 非空时以 `-c http.extraheader=...` 的形式作为**参数**传给 git：
+ * 这样凭据只存在于本次进程的 argv 里，不会写进 `.git/config`，也不需要 `shell: true`
+ * （拼 shell 字符串会把凭据暴露给注入面，得不偿失）。
+ */
+function git(cwd: string, args: string[], timeout = 20000, authHeader = ''): string {
+  const configArgs: string[] = [];
+  if (authHeader !== '') {
+    /* 显式给了凭据，就不要让 credential helper（Git Credential Manager 等）插手：
+     * 它在收到 401 时会**弹一个 GUI 对话框**等用户输入 —— 一个后台进程弹窗，
+     * 用户看到的是「点了克隆然后一直转圈」；它还可能把自己缓存的凭据顶上去。
+     * 置空 helper 后，凭据要么来自我们传的 header，要么直接 401 失败。 */
+    configArgs.push('-c', 'credential.helper=', '-c', `http.extraheader=${authHeader}`);
+  }
+  const finalArgs = configArgs.length > 0 ? [...configArgs, ...args] : args;
   try {
-    return execFileSync('git', args, {
+    return execFileSync('git', finalArgs, {
       cwd, encoding: 'utf8', timeout, windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
+      /* 后端是无终端的子进程：一旦 git 想交互（要账号密码 / 询问口令），
+       * 它会一直等一个永远不会出现的输入 —— 表现为「点克隆后转圈到超时」。
+       * 禁止交互后，凭据不对就是一条明确的 401 失败，而且立即返回。 */
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
     }).trim();
   } catch (error) {
     const err = error as { stderr?: Buffer | string; message?: string };
@@ -214,7 +303,7 @@ function git(cwd: string, args: string[], timeout = 20000): string {
 }
 
 /** 统计仓库内文件数（跳过 .git 与 node_modules）。 */
-function countFiles(root: string): number {
+function walkCount(root: string): number {
   let count = 0;
   const walk = (dir: string, depth: number): void => {
     if (depth > 12 || count > 20000) return;
@@ -232,6 +321,33 @@ function countFiles(root: string): number {
 }
 
 /**
+ * countFiles 的结果缓存（60 秒，按 repoRoot + 目录 mtime 失效）。
+ *
+ * 为什么要缓存：`repoStatus` 每被前端问一次就 walk 整仓（上限 20000 个文件），
+ * 而前端刷新状态栏的频率是秒级 —— 一个万级文件的仓库会把主线程钉在同步 readdir 上。
+ * 只认「仓库根目录的 mtime」是有意的保守近似：新增 / 删除顶层项会失效，
+ * 深层文件增删最多晚 60 秒反映到数字上（这个数字只用于展示，不参与任何判定）。
+ */
+const COUNT_CACHE_TTL_MS = 60_000;
+let countCache: { key: string; at: number; count: number } | null = null;
+
+function countFiles(root: string): number {
+  let signature = '';
+  try {
+    signature = `${path.resolve(root)}|${fs.statSync(root).mtimeMs}`;
+  } catch {
+    signature = `${path.resolve(root)}|?`;
+  }
+  const now = Date.now();
+  if (countCache && countCache.key === signature && now - countCache.at < COUNT_CACHE_TTL_MS) {
+    return countCache.count;
+  }
+  const count = walkCount(root);
+  countCache = { key: signature, at: now, count };
+  return count;
+}
+
+/**
  * 真实克隆仓库到该工作区的本地目录。
  * - 目标目录：workspaces/<workspaceId>/<repoSlug>
  * - 已存在则按 pull 语义处理（fetch + reset --hard origin/<branch>），不重复克隆。
@@ -243,7 +359,9 @@ export async function cloneRepository(input: CloneInput): Promise<CloneResult> {
     throw new ApiFailure('E_VALIDATION', '克隆地址需为 http(s) / ssh / git / file 协议');
   }
 
+  /* 同上：查不到归属就拒绝克隆，绝不把仓库 clone 到 workspaces/ 根下。 */
   const workspaceId = await assetWorkspaceId(input.assetId);
+  if (workspaceId === '') throw new ApiFailure('E_NOT_FOUND', `资产不存在，无法确定克隆落点：${input.assetId}`);
   const wsRoot = workspaceRoot(workspaceId);
   const config = await repoConfigOf(input.assetId);
 
@@ -267,12 +385,30 @@ export async function cloneRepository(input: CloneInput): Promise<CloneResult> {
   const relativePath = path.relative(WORKSPACES_ROOT, target).replace(/\\/g, '/');
 
   const depth = Number(input.depth ?? 1);
-  const authUrl = withToken(url, input.token);
+  /* 凭据只在参数里：cleanUrl 会落进 .git/config，authHeader 用完即弃。 */
+  const cleanUrl = stripCredentials(url);
+  const authHeader = authHeaderOf(url, input.token);
+
+  const sealOrigin = (): void => {
+    if (writeCleanOrigin(target, url)) return;
+    writeAudit({
+      workspaceId, actor: '系统', source: 'system',
+      action: 'repo.origin.redact', target: input.assetId,
+      result: '降级', severity: 'warn',
+      detail: `git remote set-url 失败：${relativePath}/.git/config 里的 origin 可能仍带凭据，请检查并手动改回不含凭据的地址`,
+    });
+  };
 
   if (canPull) {
-    /* 已有克隆 → 拉最新。--depth 浅克隆下 fetch 需要显式指定 depth。 */
-    git(target, ['remote', 'set-url', 'origin', authUrl]);
-    git(target, ['fetch', '--depth', String(Math.max(1, depth)), 'origin']);
+    /* 已有克隆 → 拉最新。
+     * ① 先把 origin 归一成无凭据地址（老版本可能已经把 token 写进 config）；
+     * ② fetch 时用参数带凭据，不再动 config；
+     * ③ 只有浅克隆才需要显式 --depth —— 全量克隆上带 --depth 会把它变成浅仓库。 */
+    writeCleanOrigin(target, url);
+    const fetchArgs = ['fetch'];
+    if (depth > 0) fetchArgs.push('--depth', String(depth));
+    fetchArgs.push('origin');
+    git(target, fetchArgs, 20000, authHeader);
     const branch = input.branch || config.branch || git(target, ['rev-parse', '--abbrev-ref', 'HEAD']) || 'main';
     /* 分支可能只有远端有（本地还没建）：checkout 失败就新建并对齐。 */
     try {
@@ -303,8 +439,13 @@ export async function cloneRepository(input: CloneInput): Promise<CloneResult> {
   const args = ['clone'];
   if (depth > 0) args.push('--depth', String(depth));
   if (input.branch) args.push('--branch', input.branch);
-  args.push(authUrl, target);
-  git(wsRoot, args, CLONE_TIMEOUT_MS);
+  /* 克隆用**无凭据**地址 + 参数里的 header：git 会把命令行上的 URL 写进 config，
+   * 带 token 的 URL 会就地留在磁盘上。 */
+  args.push(cleanUrl, target);
+  git(wsRoot, args, CLONE_TIMEOUT_MS, authHeader);
+
+  /* 兜底再确认一次 config 里没有凭据（用户填的地址可能自带 user:pass）。 */
+  sealOrigin();
 
   const branch = input.branch || git(target, ['rev-parse', '--abbrev-ref', 'HEAD']) || 'main';
   const commit = git(target, ['rev-parse', '--short', 'HEAD']);

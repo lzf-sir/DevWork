@@ -7,6 +7,7 @@ import { all, get, nowIso, run, tx } from './database';
 import { orgName } from './repositories';
 import { COMMAND_BLACKLIST, COMMAND_WHITELIST, SENSITIVE_RULES } from '../config/rules';
 import { CLEAN_MODE } from '../config';
+import { APP_VERSION } from '../config/version';
 
 const STAMP = '2026-11-12T09:00:00.000Z';
 
@@ -195,7 +196,9 @@ const SETTINGS: [string, string][] = [
   ['perm', JSON.stringify({ readOnlyMode: true, orgForceReadOnly: false, workspaceTrust: 'prod', allowManualWrite: true, _policySeedVersion: 2 })],
   ['privacy', JSON.stringify({ indexEnabled: true, sensitiveRules: SENSITIVE_RULES.map((r) => r.pattern), retentionDays: 30 })],
   ['look', JSON.stringify({ theme: '浅色', density: '标准', fontSize: 13 })],
-  ['about', JSON.stringify({ version: '0.4.2', channel: '桌面版', build: 'devwork-app' })],
+  /* 版本号从 config/version.ts 派生：种子只负责「首次启动时先写一份」，
+   * 老库的覆盖由 migrateAboutVersion() 负责。 */
+  ['about', JSON.stringify({ version: APP_VERSION, channel: '桌面版', build: 'devwork-app' })],
   /* 组织名：**可配置**，不再硬编码「订单中台」。
    * 那是原型期的虚构组织名，交付给用户的程序里属于残留的演示痕迹。
    * 打包态用中性默认名，用户可在设置里改成自己的组织。 */
@@ -345,10 +348,15 @@ export function seedIfEmpty(): void {
       );
     }
 
+    /* GMV_MESSAGES 的元组顺序是 [id, kind, actor, payload, stamp]，而表的列顺序是
+     * (id, conversation_id, kind, payload, actor, created_at) —— **前两位之外的顺序不同**。
+     * 原来按 m[0..4] 顺位取值，payload 落成了 'agent'、actor 落成了那段 JSON，
+     * 于是演示会话里那张审批卡一点「批准」就 500（JSON.parse('agent')）。
+     * 已存在的演示库仍是脏行，删掉 backend/.runtime 重建即可（不为演示数据写迁移）。 */
     for (const m of GMV_MESSAGES) {
       run(
         `INSERT INTO message (id,conversation_id,kind,payload,actor,created_at) VALUES (?,?,?,?,?,?)`,
-        m[0], 'c-gmv', m[1], m[2], m[3], m[4],
+        m[0], 'c-gmv', m[1], m[3], m[2], m[4],
       );
     }
     for (const entry of OTHER_MESSAGES) {

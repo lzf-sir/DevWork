@@ -11,7 +11,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ApiFailure, fail, identity, ok, queryString, wrap } from '../http/core';
-import { all, get, run, writeAudit, newId, nowIso } from '../db/database';
+import { AUDIT_GLOBAL_SCOPE, all, get, run, writeAudit, newId, nowIso } from '../db/database';
 import { demoDb } from '../db/database';
 import {
   allPanels,
@@ -58,6 +58,7 @@ import {
   cloneRepository,
   ensureWorkspaceDir,
   repoStatus,
+  resolveWorkspaceIdForAsset,
 } from '../services/workspace-repos';
 import {
   llmKeyStatus, setLlmKey, llmRuntimeConfig, resolveLlmApiKey, testLlmConnection, fetchLlmModels, LLM_PRESETS,
@@ -179,7 +180,8 @@ export function registerSqlRoutes(app: Express): void {
       mime = 'text/csv;charset=utf-8';
     }
     const auditId = writeAudit({
-      workspaceId: 'w-ops', actor: (await identity(req)).name, source: 'user',
+      /* 导出的是这条资产的查询结果 → 归属从资产推导；资产不存在就记全局。 */
+      workspaceId: resolveWorkspaceIdForAsset(assetId) || AUDIT_GLOBAL_SCOPE, actor: (await identity(req)).name, source: 'user',
       action: 'sql.export', target: String(req.params.id), result: '放行', severity: 'info',
       detail: `导出 ${result.rowCount} 行 · 格式 ${format}`,
     });

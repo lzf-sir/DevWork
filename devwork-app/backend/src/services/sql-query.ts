@@ -5,9 +5,10 @@
  */
 import { Worker } from 'node:worker_threads';
 import { DEMO_DB_PATH, SQL_TIMEOUT_MS } from '../config';
-import { checksumFile, newId, nowIso, run, writeAudit } from '../db/database';
+import { AUDIT_GLOBAL_SCOPE, checksumFile, newId, nowIso, run, writeAudit } from '../db/database';
 import { ApiFailure } from '../http/core';
 import { guard, type GuardResult } from './sql-guard';
+import { resolveWorkspaceIdForAsset } from './workspace-repos';
 import type { Identity } from '../http/core';
 
 export interface SqlQueryResult {
@@ -172,7 +173,8 @@ export async function runSqlQuery(
   const nullColumns = names.filter((name, index) => rows.some((row) => row[index] === null));
   const enumColumns = names.filter((name) => /status|state|channel/i.test(name));
   const auditId = writeAudit({
-    workspaceId: 'w-ops', actor: identity.name, source: 'user',
+    /* 查询归属跟着资产走：查询日志不该在「按工作区筛审计」里跑到别人的地盘上。 */
+    workspaceId: resolveWorkspaceIdForAsset(assetId) || AUDIT_GLOBAL_SCOPE, actor: identity.name, source: 'user',
     action: `sql.query · ${guarded.statement.slice(0, 120)}`, target: assetId,
     result: '放行', severity: 'info',
     detail: `LIMIT=${guarded.guard.appliedLimit} injected=${guarded.guard.injected} rows=${rows.length} checksum=${before === after ? 'unchanged' : 'CHANGED'}`,

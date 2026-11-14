@@ -80,7 +80,8 @@ import {
 } from '../services/conversation';
 import { bootstrapArtifacts, artifactPath, artifactSize } from '../sandbox/bootstrap';
 import { normalizeBrowserUrl, readBrowserPage, readBrowserState, writeBrowserPage, writeBrowserState } from '../services/browser';
-import { PORT } from '../config';
+import { DEFAULT_WORKSPACE_ID, PORT, browserAllowPrivate } from '../config';
+import { APP_VERSION } from '../config/version';
 
 type Row = Record<string, unknown>;
 import { probeTools, requireRow } from './helpers';
@@ -94,10 +95,15 @@ export function registerSystemRoutes(app: Express): void {
       node: process.version,
       driver,
       wal: hasWal(),
-      version: '0.4.2',
+      /* 版本号只有一个来源：config/version.ts。硬编码过一次，发版就报错了旧版本。 */
+      version: APP_VERSION,
       gitAvailable: tools.git,
       dockerAvailable: tools.docker,
       port: PORT,
+      /* 内置浏览器是否放行私有网段：设置页要显示这条安全开关的真实状态。
+       * 必须显式为 boolean —— 缺字段时前端 `undefined ? '已放行' : '已拦截'`
+       * 会把"没上报"渲染成"已拦截"，等于谎报安全状态。函数每次读 env，故不缓存。 */
+      browserAllowPrivate: browserAllowPrivate() === true,
       time: new Date().toISOString(),
     });
   });
@@ -112,7 +118,7 @@ export function registerSystemRoutes(app: Express): void {
       const row = get<Row>('SELECT id FROM workspace WHERE name = ?', name);
       return row ? String(row.id) : '';
     })();
-    const workspaceId = queryString(req, 'workspaceId', '') || defaultWs || 'w-ops';
+    const workspaceId = queryString(req, 'workspaceId', '') || defaultWs || DEFAULT_WORKSPACE_ID;
     const ws = requireRow(await workspaceById(workspaceId), '工作区');
     const who = await identity(req);
     const sidebar = await sidebarShape(workspaceId);

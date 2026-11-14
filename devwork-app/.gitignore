@@ -14,3 +14,9 @@ release-test/
 *.log
 *.tsbuildinfo
 .DS_Store
+
+# Vite 在加载 TS 配置时写出的临时配置文件（曾被误提交两个，见 A-P2-01）
+vite.config.ts.timestamp-*
+
+# 临时验证目录（QA 在仓库内做仓库外启动对照时留下的）
+dw-verify-tmp/

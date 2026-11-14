@@ -31,6 +31,19 @@ export const SCHEMA_PATH = process.env.DEVWORK_SCHEMA_PATH
   : path.join(here, 'db', 'schema.sql');
 export const DIST_DIR = path.join(ROOT, 'dist');
 
+/**
+ * 默认工作区 id —— 全后端**唯一**允许出现这个字面量的地方。
+ *
+ * 它的语义只有三种，别的地方一律不许取它当缺省值：
+ *   ① 启动 / 引导（/api/bootstrap 解析不出项目时回落）；
+ *   ② 建实体（新建会话 / 资产 / 结构性播种，本来就没有归属可查）；
+ *   ③ 种子数据。
+ *
+ * 审计归属**禁止**用它：审计要回答「这件事发生在谁的地盘」，
+ * 不知道就记 `AUDIT_GLOBAL_SCOPE`，拿默认工作区顶上等于伪造归属。
+ */
+export const DEFAULT_WORKSPACE_ID = 'w-ops';
+
 export const HOST = '127.0.0.1';
 export const PORT = Number(process.env.DEVWORK_PORT ?? 3001);
 export const CORS_ORIGINS = ['http://127.0.0.1:5173', 'http://localhost:5173'];

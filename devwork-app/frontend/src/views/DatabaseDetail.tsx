@@ -8,7 +8,6 @@ import {
   Banner,
   DetailHeader,
   GearSvg,
-  MetricGrid,
   Pill,
   TriangleSvg,
   copyToClipboard,

@@ -173,7 +173,7 @@ export default function Composer(props: ComposerProps): React.ReactElement {
     attachments, onAttachmentsChange, onUpload, uploading,
     model, onModelChange, onCommand, meter, context,
   } = props;
-  const { state, addToast, setModal, setHelp, setReadOnly, toggleReadOnly } = useStore();
+  const { state, addToast, setModal, setHelp, toggleReadOnly } = useStore();
   const refresh = useLiveRefresh();
   const readOnly = state.readOnly;
 

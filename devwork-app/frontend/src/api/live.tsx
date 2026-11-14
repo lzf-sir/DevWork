@@ -175,6 +175,30 @@ function applyCitations(next: ViewSnapshot, citations: unknown): void {
   assign(next, 'CITATIONS', mapped);
 }
 
+/**
+ * 会话级切片的「空值基线」。
+ *
+ * 为什么需要它：右栏三段（上下文 / 执行 / 产物）与引用是**会话级**数据，
+ * 而 `applyContextPanel` 等函数只在拿到非空结果时才赋值（避免用空响应把
+ * 真实数据擦掉）。两者叠加就出现串味：从「有挂载资产/有产物」的会话切到
+ * **空会话**时，那几个切片根本不会被写，`setData(prev => ({...prev, ...partial}))`
+ * 就把上一个会话的右栏原样留着 —— 界面显示的是别人的资产。
+ *
+ * 所以切会话时先用这份空基线**显式清场**，再把非空结果叠上去：
+ * 有数据 → 显示新数据；没数据 → 空态，而不是旧数据。
+ */
+function sessionPanelBaseline(): Partial<ViewSnapshot> {
+  return {
+    CTX_MOUNTED: [],
+    CTX_HITS: [],
+    CTX_BARS: [],
+    RUN_TOOLS: [],
+    RUN_BARS: [],
+    OUTPUT_FILES: [],
+    CITATIONS: {},
+  };
+}
+
 /** 只刷新「会话级」数据（右栏三段 + 引用）。切会话时用它，避免 30 个请求全量重拉。 */
 async function loadPanels(conversationId: string): Promise<Partial<ViewSnapshot>> {
   const [ctx, execution, artifacts, citations] = await Promise.all([
@@ -183,7 +207,8 @@ async function loadPanels(conversationId: string): Promise<Partial<ViewSnapshot>
     safe(api.getArtifactPanel(conversationId)),
     safe(api.listCitations(conversationId)),
   ]);
-  const next = {} as ViewSnapshot;
+  /* 先清场再叠加：顺序不能反。 */
+  const next = { ...sessionPanelBaseline() } as ViewSnapshot;
   applyContextPanel(next, ctx);
   applyExecutionPanel(next, execution);
   applyArtifactPanel(next, artifacts);
@@ -427,10 +452,12 @@ export function LiveDataProvider({ children }: { children: React.ReactNode }): R
   /* 右栏三段与引用是「会话级」数据：一律跟随活跃会话，不再写死 c-gmv。 */
   const { state } = useStore();
   const conversationId = state.activeConversationId;
+  const workspaceId = state.workspaceId;
+  /* convRef 只用于「全量装配时取当前会话」：会话变化不该触发 30 个请求重来，
+   * 那是 loadPanels 的活儿。workspaceId 则相反 —— 它必须进依赖数组，
+   * 否则切工作区后右栏/文件树/SQL 表全是上一个工作区的（A-P1-04）。 */
   const convRef = useRef<string>(conversationId);
   convRef.current = conversationId;
-  const workspaceRef = useRef<string>(state.workspaceId);
-  workspaceRef.current = state.workspaceId;
 
   const [data, setData] = useState<ViewSnapshot>(baseSnapshot());
   const [version, setVersion] = useState<number>(0);
@@ -441,7 +468,9 @@ export function LiveDataProvider({ children }: { children: React.ReactNode }): R
   /* 全量装配：组织 / 设置 / 资产 / 索引 / 表结构等与会话无关的切片。 */
   useEffect(() => {
     let alive = true;
-    void loadSnapshot(convRef.current, workspaceRef.current).then((snapshot) => {
+    /* workspaceId 作为参数直传（不再经 ref 兜一圈）：ref 只是"能读到最新值"，
+     * 它不会让 effect 重跑，于是切工作区时这段装配压根不执行。 */
+    void loadSnapshot(convRef.current, workspaceId).then((snapshot) => {
       if (!alive) return;
       setData(snapshot);
       setVersion((value) => value + 1);
@@ -449,13 +478,16 @@ export function LiveDataProvider({ children }: { children: React.ReactNode }): R
     return () => {
       alive = false;
     };
-  }, [tick]);
+  }, [tick, workspaceId]);
 
   /* 切会话：只重拉右栏三段 + 引用（4 个请求），避免整页 30 个请求重来。 */
-  const loadedConvRef = useRef<string>('');
+  const loadedKeyRef = useRef<string>('');
   useEffect(() => {
-    if (!conversationId || loadedConvRef.current === conversationId) return;
-    loadedConvRef.current = conversationId;
+    /* 去重键带工作区：同样的 conversationId 在两个工作区下不是同一份数据，
+     * 只按 conversationId 去重会让「切工作区但仍停在同 id」时右栏不刷新。 */
+    const key = `${workspaceId}:${conversationId}`;
+    if (!conversationId || loadedKeyRef.current === key) return;
+    loadedKeyRef.current = key;
     let alive = true;
     void loadPanels(conversationId).then((partial) => {
       if (!alive) return;
@@ -465,7 +497,7 @@ export function LiveDataProvider({ children }: { children: React.ReactNode }): R
     return () => {
       alive = false;
     };
-  }, [conversationId]);
+  }, [conversationId, workspaceId]);
 
   const value = React.useMemo<LiveContextValue>(
     () => ({ data, refresh, version }),

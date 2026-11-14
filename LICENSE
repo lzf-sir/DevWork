@@ -1,0 +1,55 @@
+DevWork 专有软件许可（Proprietary License）
+Copyright © 2026 DevWork. All rights reserved.
+
+本软件（含可执行文件、内置运行时、前端构建产物、源码与文档，以下合称"本软件"）为
+专有软件，版权及一切相关权利归权利人所有。本软件不适用任何开源许可协议
+（不适用 MIT、Apache-2.0、BSD、GPL 等），亦不随附任何开源许可授予的权利。
+
+一、许可范围
+1. 在权利人明示授权的范围内，被授权方可以为自身业务目的安装并使用本软件。
+2. 未取得权利人的书面（含电子形式）授权，任何人不得使用本软件。
+   取得本软件副本本身不构成授权。
+
+二、禁止行为
+除权利人书面明确许可外，被授权方不得：
+1. 再分发、转售、出租、出借、转让本软件或其任何部分，包括以捆绑、镜像、
+   二次打包、SaaS 转提供等方式提供给第三方；
+2. 反编译、反汇编、逆向工程、脱壳，或以其他方式试图获取本软件的源代码、
+   内部数据结构与算法；
+3. 移除、遮蔽或篡改本软件中的版权声明、许可声明、商标与其他权利标识；
+4. 修改、创作衍生作品，或将本软件的任何部分并入其他产品。
+
+三、第三方组件
+本软件包含第三方开源组件（例如 Electron、Express、React、zod、esbuild 等）。
+各组件依其自身许可协议授权，其许可声明以各自项目发布内容为准
+（Electron/Chromium 的声明随发行包一并提供）。若本许可与第三方
+组件许可存在冲突，就该组件而言以该组件许可为准。
+
+四、无担保
+本软件按"现状"提供，不附带任何明示或默示的担保，包括但不限于对适销性、
+特定用途适用性、无侵权及不间断运行的担保。本软件包含标注为"实验性"的能力
+（例如受控写通道），此类能力可能导致数据被修改；使用前请自行备份，
+并建议仅在克隆出来的仓库上试用。
+
+五、责任限制
+在适用法律允许的最大范围内，权利人不对因使用或无法使用本软件而产生的任何
+直接、间接、附带、特殊、惩罚性或后果性损害承担责任，包括但不限于数据丢失、
+业务中断、利润损失，无论该等损害是否可预见，亦无论基于何种责任理论。
+即使权利人已被告知发生此类损害的可能性，本条限制仍然适用。
+
+六、终止
+被授权方违反本许可任何条款时，其获授的权利自动终止，并应立即停止使用
+并销毁本软件的全部副本。
+
+七、其他
+本许可未明示授予的权利，均由权利人保留。本许可适用中华人民共和国法律。
+
+---
+
+Proprietary License — English summary (for reference only; the Chinese text above governs):
+This software is proprietary and all rights are reserved by the copyright holder.
+No license, express or implied, is granted except as authorized in writing by the
+rights holder. Redistribution, reverse engineering, decompilation, modification and
+creation of derivative works are prohibited. The software is provided "AS IS",
+without warranty of any kind, and the rights holder shall not be liable for any
+damages arising from its use.

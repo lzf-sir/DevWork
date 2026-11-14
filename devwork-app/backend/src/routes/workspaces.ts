@@ -80,7 +80,7 @@ import {
 } from '../services/conversation';
 import { bootstrapArtifacts, artifactPath, artifactSize } from '../sandbox/bootstrap';
 import { normalizeBrowserUrl, readBrowserPage, readBrowserState, writeBrowserPage, writeBrowserState } from '../services/browser';
-import { PORT } from '../config';
+import { DEFAULT_WORKSPACE_ID, PORT } from '../config';
 
 type Row = Record<string, unknown>;
 import { body, requireRow } from './helpers';
@@ -135,7 +135,7 @@ export function registerWorkspaceRoutes(app: Express): void {
   }));
   app.delete('/api/workspaces/:id', wrap(async (req: Request, res: Response) => {
     const id = String(req.params.id);
-    if (id === 'w-ops') throw new ApiFailure('E_VALIDATION', '默认工作区不可删除');
+    if (id === DEFAULT_WORKSPACE_ID) throw new ApiFailure('E_VALIDATION', '默认工作区不可删除');
     run('DELETE FROM workspace WHERE id = ?', id);
     ok(res, { deleted: true });
   }));

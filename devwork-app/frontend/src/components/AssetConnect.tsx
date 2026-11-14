@@ -13,7 +13,6 @@ import {
   needsClone,
   specOf,
   visibleFields,
-  type AssetTypeSpec,
   type FieldSpec,
   type FormValues,
 } from './assetForms';

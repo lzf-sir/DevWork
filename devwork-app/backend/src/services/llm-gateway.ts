@@ -12,7 +12,7 @@ import path from 'node:path';
 import { SERVER_ROOT } from '../config';
 import { loadSecret, storeSecret } from './secret-store';
 import { settingRaw } from '../db/repositories';
-import { run } from '../db/database';
+import { all, run } from '../db/database';
 import { toolIsWrite, toolRisk } from '../config/tools';
 
 /** 没有供应商 usage 时的本地估算（字符数 / 1.5 ≈ token 数，仅用于兜底，不是真值）。 */
@@ -134,11 +134,22 @@ interface ToolStep {
   args: string;
   risk: 'low' | 'medium' | 'high';
   write: boolean;
+  /**
+   * 只是示例、当前环境并不具备执行条件（例如日志资产没挂载时给 `fs_truncate_log` 的命令）。
+   * 标了它就不再给出针对不存在文件的具体路径，只说明「需先挂载日志资产」。
+   */
+  sampleOnly?: boolean;
 }
 
 interface Template {
   steps: { goal: string; durationMs: number }[];
+  /** 固定正文（不涉及"挂载了什么"的那几句）。 */
   text: string;
+  /**
+   * 正文里需要说明"挂载了哪些资产"时，只给后半句，前半句由 `mountingSentence()`
+   * 按当前工作区真实资产拼——模板里不能再写死任何资产名。
+   */
+  mountingTail?: string;
   tools: ToolStep[];
 }
 
@@ -150,7 +161,8 @@ const TEMPLATES: Record<string, Template> = {
       { goal: '检索 GMV 口径说明与季度复盘', durationMs: 900 },
       { goal: '把证据交给用户判断（未接入模型，不产出结论）', durationMs: 120 },
     ],
-    text: '已挂载生产库与运营知识库。先按只读方式核对订单状态分布，再检索口径文档。',
+    text: '',
+    mountingTail: '先按只读方式核对订单状态分布，再检索口径文档。',
     tools: [
       {
         toolName: 'pg_sql_query',
@@ -273,6 +285,57 @@ function keywordQuery(content: string): string {
   return tokens.length > 0 ? tokens.join(' ') : cleaned;
 }
 
+/** 当前工作区**实际**挂载的资产。 */
+interface MountedAsset {
+  id: string;
+  name: string;
+  type: string;
+}
+
+/**
+ * 读当前工作区真实挂载的资产（按创建顺序，与侧栏一致）。
+ *
+ * 为什么降级轨迹必须查库而不是沿用模板里的写死值：模板里写的是演示种子资产
+ * （生产库 / 运营知识库），干净环境（打包态首启）一个资产都没有，那时对用户说
+ * 「已挂载生产库与运营知识库」就是**假话**——与「版本号报旧的」「审计归属恒 w-ops」
+ * 同属"记录/文案说 A、实际是 B"。所以文案一律按运行时事实生成，不按 CLEAN_MODE 硬切：
+ * 演示态真有这些资产，文案自然还是真的。
+ */
+function mountedAssetsOf(workspaceId: string): MountedAsset[] {
+  if (!workspaceId) return [];
+  return all<{ id: string; name: string; type: string }>(
+    'SELECT id, name, type FROM asset WHERE workspace_id = ? ORDER BY created_at, id',
+    workspaceId,
+  ).map((row) => ({ id: String(row.id), name: String(row.name), type: String(row.type) }));
+}
+
+/** 「先说哪几类」的优先级：这句正文在讲核对订单分布 + 检索口径文档，库与知识库最相关。 */
+const MOUNT_ORDER = ['db', 'kb', 'code', 'server', 'log', 'api'];
+
+/**
+ * 「已挂载哪些资产」的诚实文案。
+ * 0 个资产时**不得出现「已挂载」字样**：没有挂载就说没有，并告诉用户下一步该做什么。
+ */
+function mountingSentence(assets: MountedAsset[], tail = ''): string {
+  if (assets.length === 0) {
+    return '当前工作区尚未挂载资产。接入一个资产后，我才能给出带引用的结论。';
+  }
+  const rank = (type: string): number => {
+    const index = MOUNT_ORDER.indexOf(type);
+    return index < 0 ? MOUNT_ORDER.length : index;
+  };
+  /* 同名资产（dev / prod 两个 order_db）只报一次名字，否则会出现「order_db、order_db」这种废话；
+   * 计数仍按真实资产条数，不因去重而少报。 */
+  const names: string[] = [];
+  for (const asset of [...assets].sort((a, b) => rank(a.type) - rank(b.type))) {
+    if (!names.includes(asset.name)) names.push(asset.name);
+  }
+  const listed = names.length <= 3
+    ? `${names.join('、')}（共 ${assets.length} 个资产）`
+    : `${names.slice(0, 3).join('、')} 等 ${assets.length} 个资产`;
+  return `已挂载${listed}。${tail}`;
+}
+
 /** 未接入模型时的统一说明文案（不再有任何结论或置信度）。 */
 const DEGRADED_NOTICE = [
   '本次未调用大模型：服务端没有配置可用 Key（DEVWORK_API_KEY 或系统钥匙串），因此不会产出结论、置信度与产物。',
@@ -292,20 +355,42 @@ export class MockGateway implements LlmGateway {
     const intent = detectIntent(ctx.content);
     const template = TEMPLATES[intent] ?? TEMPLATES.general;
     const query = keywordQuery(ctx.content);
+    /* 本工作区真实挂载了什么，是这段轨迹里所有"已挂载 X"文案的唯一来源。 */
+    const assets = mountedAssetsOf(ctx.workspaceId);
+    const hasLogAsset = assets.some((asset) => asset.type === 'log');
 
-    yield { type: 'routing', intent, mountedAssets: ['a-order-db-prod', 'a-kb'], model: '未接入模型', degraded: true };
-    yield { type: 'plan', intent, steps: template.steps, degraded: true };
+    yield { type: 'routing', intent, mountedAssets: assets.map((asset) => asset.id), model: '未接入模型', degraded: true };
+    /* 步骤标题里若提到挂载某类资产，clean 态必须改成"尚未挂载"——
+     * 否则计划卡第一行就在暗示"已经接好了一个生产库"。 */
+    const steps = assets.length === 0
+      ? template.steps.map((step) => (step.goal.includes('挂载')
+        ? { ...step, goal: '识别意图（当前工作区尚未挂载资产）' }
+        : step))
+      : template.steps;
+    yield { type: 'plan', intent, steps, degraded: true };
     /* 演示轨迹也给一张清单卡：让人先看清"长任务长什么样"。
      * 全部 pending —— 这几步并没有被执行过，标 done 就是假装。 */
     yield {
       type: 'todo',
-      items: template.steps.map((step, index) => ({ id: `t${index + 1}`, title: step.goal, status: 'pending' })),
+      items: steps.map((step, index) => ({ id: `t${index + 1}`, title: step.goal, status: 'pending' })),
       degraded: true,
     };
-    yield { type: 'text', content: template.text };
+    /* 正文里凡涉及"挂载了什么"，一律按当前工作区真实资产生成；
+     * 其它模板不涉挂载，原样输出（它们没有对环境的断言）。 */
+    yield {
+      type: 'text',
+      content: template.mountingTail !== undefined
+        ? mountingSentence(assets, template.mountingTail)
+        : template.text,
+    };
 
     const citations: CitationSeed[] = [];
-    for (const step of template.tools) {
+    for (const rawStep of template.tools) {
+      /* 日志资产没挂载时，`fs_truncate_log /var/log/order-api/error.log` 指向的是一个
+       * **不存在**的文件：给出这种具体命令等于编造现场。降级为示例，只说"需先挂载日志资产"。 */
+      const step: ToolStep = rawStep.toolName === 'fs_truncate_log' && !hasLogAsset
+        ? { ...rawStep, label: 'fs_truncate_log（示例）', args: '{"example":true}', sampleOnly: true }
+        : rawStep;
       const args = step.args.replace('{{content}}', query);
       /* 写操作不做任何执行尝试：交给权限内核判 deny/suggest，这里只输出意图。
        * 这是 Mock 唯一"不真实"的地方，而且它不会假装成功——result 明确写未执行。 */
@@ -317,7 +402,9 @@ export class MockGateway implements LlmGateway {
           args,
           durationMs: 0,
           risk: step.risk,
-          result: '未执行 · Agent 写操作由权限内核拦截，只生成建议',
+          result: step.sampleOnly
+            ? '示例命令 · 需先挂载日志资产（未执行）'
+            : '未执行 · Agent 写操作由权限内核拦截，只生成建议',
           ok: false,
           write: true,
         };
@@ -491,7 +578,7 @@ export class OpenAiCompatibleGateway implements LlmGateway {
   async *generate(ctx: GatewayContext): AsyncIterable<AgentEvent> {
     let text = '';
     try {
-      yield { type: 'routing', intent: detectIntent(ctx.content), mountedAssets: ['a-order-db-prod', 'a-kb'], model: this.model };
+      yield { type: 'routing', intent: detectIntent(ctx.content), mountedAssets: mountedAssetsOf(ctx.workspaceId).map((asset) => asset.id), model: this.model };
 
       const messages: Record<string, unknown>[] = [
         { role: 'system', content: this.systemPrompt(ctx) },

@@ -80,7 +80,7 @@ import {
 } from '../services/conversation';
 import { bootstrapArtifacts, artifactPath, artifactSize } from '../sandbox/bootstrap';
 import { normalizeBrowserUrl, readBrowserPage, readBrowserState, writeBrowserPage, writeBrowserState } from '../services/browser';
-import { PORT } from '../config';
+import { DEFAULT_WORKSPACE_ID, PORT } from '../config';
 
 type Row = Record<string, unknown>;
 
@@ -92,7 +92,7 @@ export function registerToolRoutes(app: Express): void {
     }
     /* 可用性判据（设计 §4）：requiresAssets ⊆ 工作区现有资产类型；
      * 缺失时返回 available:false + missing，前端显示「不可用」而非隐藏。 */
-    const workspaceId = queryString(req, 'workspaceId', 'w-ops');
+    const workspaceId = queryString(req, 'workspaceId', DEFAULT_WORKSPACE_ID);
     const types = (all<Row>(
       'SELECT DISTINCT type FROM asset WHERE workspace_id = ?', workspaceId,
     )).map((row) => String(row.type));
@@ -101,7 +101,7 @@ export function registerToolRoutes(app: Express): void {
 
   /* ---------------- 派生工具面 / 命令模板库（诊断与模型自描述） ---------------- */
   app.get('/api/tools', wrap(async (req: Request, res: Response) => {
-    const workspaceId = queryString(req, 'workspaceId', 'w-ops');
+    const workspaceId = queryString(req, 'workspaceId', DEFAULT_WORKSPACE_ID);
     const face = await deriveToolFace(workspaceId);
     /* 精简形态：entry/schema 全量对象对诊断 UI 是噪音，只留契约字段（前端 ToolFaceTool）。 */
     const lean = (tool: typeof face.all[number]) => ({

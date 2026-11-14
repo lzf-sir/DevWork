@@ -481,8 +481,13 @@ export default function ChatThread(props: ChatThreadProps): React.ReactElement {
          * ② 没有 plan（演示轨迹遗留名 / 无可执行内容）时批准只记裁决不执行，文案要如实说；
          * ③ 裁决结果来自服务端 auditId，不在前端编。
          * V2：hasPlan=true 的卡批准后服务端按 precheck→执行→校验→回滚 真执行；
-         * 「本会话允许」登记会话级审批记忆（键=intent+targetType+risk，不含参数）；
-         * 已批准且产生 rollbackRef 的卡给「回滚」按钮。 */
+         * 已批准且产生 rollbackRef 的卡给「回滚」按钮。
+         *
+         * **1.0 只有「单次批准」，没有会话级免审（scope 恒为 once）。**
+         * 后端 conversation.ts 已写明「scope 仅为兼容旧客户端保留，1.0 一律按 once 处理」，
+         * 所以前端原来那个「批准并免审」按钮是**界面说谎**：
+         * 用户点完看到"同类操作免审"，实际每次仍会被拦。
+         * 按钮、toast、卡片状态文案已一并删干净，别再加回来。 */
         const deliverToTerminal = (): void => {
           copyToClipboard(message.cmd);
           setTermPreset(message.cmd);
@@ -495,14 +500,18 @@ export default function ChatThread(props: ChatThreadProps): React.ReactElement {
             ? (message.executionOk ? '已批准并执行' : '已批准（执行失败，无副作用）')
             : '已批准（仅记录裁决，未执行）')
           : '已拒绝';
-        const decide = (scope: 'once' | 'session'): void => {
-          void api.respondApproval(conversationId, message.id, 'approve', scope).then((envelope) => {
+        /**
+         * 批准：固定 once 语义。
+         *
+         * 不发 scope 参数（`respondApproval` 默认 'once'），文案也明说「下次仍需再次批准」——
+         * 对外承诺是「写操作逐次人工批准」，界面上任何一个"免审"的暗示都不能留。
+         */
+        const decide = (): void => {
+          void api.respondApproval(conversationId, message.id, 'approve', 'once').then((envelope) => {
             if (envelope.ok) {
-              addToast(scope === 'session'
-                ? '已批准执行 · 本会话内同类操作免审（按 intent+类型+风险记忆，不放宽到不同目标）'
-                : executableCard
-                  ? '已批准 · precheck→执行→校验 管线已跑完，回滚引用见卡片'
-                  : '已批准 · 裁决已记入审计（无可执行内容，磁盘零变更）');
+              addToast(executableCard
+                ? '已批准并执行 · 下次同类操作仍需再次批准（回滚引用见卡片）'
+                : '已批准 · 裁决已记入审计，下次同类操作仍需再次批准（磁盘零变更）');
             } else {
               addToast(`批准失败：${envelope.error?.message ?? '网络异常'}`);
             }
@@ -518,7 +527,7 @@ export default function ChatThread(props: ChatThreadProps): React.ReactElement {
               {message.reason ? <>{' '}{message.reason} </> : null}{' '}
               <span style={{ color: 'var(--gray-400)', fontSize: 11.5 }}>
                 {resolved
-                  ? (message.scope === 'session' ? '（本会话免审已生效 · 裁决已记入审计）' : '（裁决已记入审计）')
+                  ? '（裁决已记入审计 · 下次同类操作仍需再次批准）'
                   : executableCard
                     ? '（Agent 发起 · 批准后按 precheck→执行→校验→回滚 管线真执行）'
                     : state.readOnly
@@ -587,13 +596,8 @@ export default function ChatThread(props: ChatThreadProps): React.ReactElement {
                 拒绝
               </button>
               {!state.readOnly ? (
-                <button className="btn p" disabled={resolved} onClick={() => decide('once')}>
+                <button className="btn p" disabled={resolved} onClick={decide}>
                   {executableCard ? '批准执行' : '批准'}
-                </button>
-              ) : null}
-              {!state.readOnly && executableCard ? (
-                <button className="btn p" disabled={resolved} onClick={() => decide('session')} title="本会话内同类操作（intent+类型+风险）免审；不含具体参数，不同目标不继承">
-                  批准并本会话免审
                 </button>
               ) : null}
             </span>

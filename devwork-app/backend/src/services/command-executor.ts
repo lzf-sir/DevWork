@@ -12,6 +12,7 @@ import { COMMAND_TIMEOUT_MS, MAX_TERMINAL_SESSIONS, TERMINAL_DIR, ensureDirs } f
 import { COMMAND_BLACKLIST, COMMAND_WHITELIST, SENSITIVE_RULES, SHELL_META } from '../config/rules';
 import { all, get, newId, nowIso, run, tx, writeAudit } from '../db/database';
 import { REPO_ROOT } from '../sandbox/bootstrap';
+import { resolveWorkspaceIdForAsset } from './workspace-repos';
 import { check, kernelIdentity, type PermissionContext } from '../kernel/permission';
 import { ApiFailure, type Identity } from '../http/core';
 
@@ -196,9 +197,32 @@ function digest(text: string): string {
 
 /* ---------------- 24 条 Node 内置真实输出 ---------------- */
 
+/** 内置 grep / cat 的硬上限：请求线程是同步的，一次读进来就卡住整个后端。 */
+const BUILTIN_MAX_FILE_BYTES = 8 * 1024 * 1024;
+/** 用户输入的正则长度上限：灾难性回溯的典型写法都很短，但超长 pattern 一定是攻击。 */
+const BUILTIN_MAX_PATTERN_LENGTH = 200;
+
+/**
+ * 把相对路径拼到会话 cwd 下，越界一律退回 cwd。
+ *
+ * 判定必须带分隔符：`/a/sess-1` 前缀匹配得中 `/a/sess-1x/secret`，
+ * 于是 `cat ../sess-1x/secret` 能读到会话目录**之外**的文件。
+ * 与 file-service.resolve / workspace-repos.assertInside 保持同一写法。
+ */
 function safeJoin(cwd: string, rel: string | undefined): string {
-  const candidate = path.resolve(cwd, rel && rel !== '' ? rel : '.');
-  return candidate.startsWith(path.resolve(cwd)) ? candidate : cwd;
+  const base = path.resolve(cwd);
+  const candidate = path.resolve(base, rel && rel !== '' ? rel : '.');
+  return candidate === base || candidate.startsWith(`${base}${path.sep}`) ? candidate : base;
+}
+
+/** 读文件前的大小预检：超限返回 null，由调用方给出「请用 head/tail」的提示。 */
+function statSizeOf(target: string): number | null {
+  try {
+    const stat = fs.statSync(target);
+    return stat.isFile() ? stat.size : null;
+  } catch {
+    return null;
+  }
 }
 
 function readFileLines(target: string): string[] {
@@ -230,11 +254,21 @@ function builtinDispatch(command: string, argv: string[], cwd: string): Dispatch
     case 'cat': {
       const target = safeJoin(cwd, arg);
       if (!fs.existsSync(target)) return out('', `cat: ${arg}: 没有那个文件或目录`);
+      /* 大小预检：cat 一个大文件等于把它整个读进内存再拼成一条响应。 */
+      const size = statSizeOf(target);
+      if (size !== null && size > BUILTIN_MAX_FILE_BYTES) {
+        return out('', `cat: ${arg}: 文件 ${Math.round(size / 1024 / 1024)}MB 超过 ${BUILTIN_MAX_FILE_BYTES / 1024 / 1024}MB 上限，请缩小范围改用 head / tail -n`);
+      }
       return out(fs.readFileSync(target, 'utf8').replace(/\n$/, ''));
     }
     case 'head':
     case 'tail': {
       const target = safeJoin(cwd, argv.find((a) => !a.startsWith('-') && !/^\d+$/.test(a)) ?? '');
+      const size = statSizeOf(target);
+      /* head / tail 只需要文件首尾若干行，但 readFileSync 是全量读 —— 预检拦在这里比截断更省。 */
+      if (size !== null && size > BUILTIN_MAX_FILE_BYTES) {
+        return out('', `${cmd}: 文件 ${Math.round(size / 1024 / 1024)}MB 超过 ${BUILTIN_MAX_FILE_BYTES / 1024 / 1024}MB 上限，请缩小范围后再试`);
+      }
       const lines = readFileLines(target);
       const count = Number((argv.find((a) => /^\d+$/.test(a)) ?? '10')) || 10;
       return out((cmd === 'head' ? lines.slice(0, count) : lines.slice(-count)).join('\n'));
@@ -242,6 +276,12 @@ function builtinDispatch(command: string, argv: string[], cwd: string): Dispatch
     case 'grep': {
       const pattern = arg.replace(/^-e$/, '') || argv[0] || '';
       const target = safeJoin(cwd, argv.slice(1).find((a) => !a.startsWith('-')) ?? '.');
+      /* pattern 由用户输入直接编译成正则且没有超时：`(a+)+$` 这类写法能让
+       * 主线程卡死数十秒，期间整个后端（含 /api/health）都不响应。
+       * 长度上限 + 大小上限只能挡住最常见的两种，正则本身仍然尽力而为。 */
+      if (pattern.length > BUILTIN_MAX_PATTERN_LENGTH) {
+        return out('', `grep: 表达式过长（${pattern.length} > ${BUILTIN_MAX_PATTERN_LENGTH} 字符），请缩小范围`);
+      }
       try {
         const regex = new RegExp(pattern, 'i');
         const files = fs.statSync(target).isDirectory()
@@ -249,7 +289,12 @@ function builtinDispatch(command: string, argv: string[], cwd: string): Dispatch
           : [target];
         const hits: string[] = [];
         files.forEach((file) => {
-          if (!fs.statSync(file).isFile()) return;
+          const size = statSizeOf(file);
+          if (size === null) return;
+          if (size > BUILTIN_MAX_FILE_BYTES) {
+            hits.push(`${path.basename(file)}:0:(已跳过：文件超过 ${BUILTIN_MAX_FILE_BYTES / 1024 / 1024}MB，请缩小范围)`);
+            return;
+          }
           readFileLines(file).forEach((line, index) => {
             if (regex.test(line)) hits.push(`${path.basename(file)}:${index + 1}:${line}`);
           });
@@ -564,6 +609,13 @@ export async function executeCommand(
   const sessionId = input.sessionId || 'sess-1';
   const cwd = await ensureSession(assetId, sessionId);
   const ctx: PermissionContext = kernelIdentity(identity);
+  /* 审计归属按三级取值：① 资产实际归属 → ② 资产已不存在则留空。
+   * 为什么不用 assetWorkspaceId()：它是**路径解析专用**（查不到给空串），
+   * 用它填审计要么写进空串、要么逼调用点自己兜一个默认值 —— 两者都会让
+   * 「这条命令动的是哪个工作区」说不清。这里要的是能表达「不认识」的 null。
+   * 拿不到归属时记空串，并在 detail 里写明 workspace:unknown（不认识就说不认识）。 */
+  const workspaceId = resolveWorkspaceIdForAsset(assetId) ?? '';
+  const workspaceNote = workspaceId === '' ? ' · workspace:unknown' : '';
 
   /* 前置 1：全串 + 逐段黑名单，必须在任何 spawn / 文件读取之前。 */
   const segments = splitSegments(command);
@@ -571,14 +623,14 @@ export async function executeCommand(
   if (hit) {
     const stdout = blockedOutput(hit.pattern);
     const auditId = writeAudit({
-      workspaceId: 'w-ops',
+      workspaceId,
       actor: identity.name,
       source: 'user',
       action: `exec.blocked · ${command}`,
       target: assetId,
       result: '拦截',
       severity: 'warn',
-      detail: `黑名单命中 ${hit.id} · 命令全文：${command} · spawnCount=0`,
+      detail: `黑名单命中 ${hit.id} · 命令全文：${command} · spawnCount=0${workspaceNote}`,
     });
     return denyResult({
       reasonCode: 'E_COMMAND_BLOCKED', reason: `危险命令命中黑名单：${hit.description}`,
@@ -593,9 +645,9 @@ export async function executeCommand(
   if (sensitiveTokens.some((token) => isSensitiveName(token))) {
     const stdout = '✕ 已拦截：敏感文件已排除（12 条规则），不进索引也不进上下文';
     const auditId = writeAudit({
-      workspaceId: 'w-ops', actor: identity.name, source: 'user',
+      workspaceId, actor: identity.name, source: 'user',
       action: `exec.blocked · ${command}`, target: assetId, result: '拦截', severity: 'warn',
-      detail: `敏感文件规则 · 命令全文：${command} · spawnCount=0`,
+      detail: `敏感文件规则 · 命令全文：${command} · spawnCount=0${workspaceNote}`,
     });
     return denyResult({
       reasonCode: 'E_SENSITIVE_FILE', reason: '敏感文件已排除', rule: 'sensitive-rules-12',
@@ -608,9 +660,9 @@ export async function executeCommand(
   if (SHELL_META.some((meta) => meta !== '\n' && command.includes(meta))) {
     const stdout = '✕ 已拦截：命令包含 shell 控制符 / 重定向，未发送到远端';
     const auditId = writeAudit({
-      workspaceId: 'w-ops', actor: identity.name, source: 'user',
+      workspaceId, actor: identity.name, source: 'user',
       action: `exec.blocked · ${command}`, target: assetId, result: '拦截', severity: 'warn',
-      detail: `shell 元字符 · 命令全文：${command} · spawnCount=0`,
+      detail: `shell 元字符 · 命令全文：${command} · spawnCount=0${workspaceNote}`,
     });
     return denyResult({
       reasonCode: 'E_COMMAND_BLOCKED', reason: '命令包含 shell 控制符', rule: 'shell-meta',
@@ -624,9 +676,9 @@ export async function executeCommand(
   if (misses.length > 0) {
     const stdout = `✕ 已拦截：命令不在白名单（42 条）· 未发送到远端\n  未命中片段：${misses.join(' ; ')}`;
     const auditId = writeAudit({
-      workspaceId: 'w-ops', actor: identity.name, source: 'user',
+      workspaceId, actor: identity.name, source: 'user',
       action: `exec.blocked · ${command}`, target: assetId, result: '拦截', severity: 'warn',
-      detail: `非白名单 · 命令全文：${command} · spawnCount=0`,
+      detail: `非白名单 · 命令全文：${command} · spawnCount=0${workspaceNote}`,
     });
     return denyResult({
       reasonCode: 'E_NOT_WHITELISTED', reason: '命令不在白名单', rule: 'whitelist-42',
@@ -637,7 +689,7 @@ export async function executeCommand(
 
   /* 内核裁决：actor 恒 user，手动终端输入放行。 */
   const verdict = await check({
-    actor: 'user', action: 'exec.read', risk: 'low', workspaceId: 'w-ops', assetId,
+    actor: 'user', action: 'exec.read', risk: 'low', workspaceId, assetId,
   }, ctx);
   if (verdict.effect === 'deny') {
     const stdout = `✕ 已拦截：${verdict.reason} · 未发送到远端`;
@@ -675,10 +727,10 @@ export async function executeCommand(
 
   const durationMs = Date.now() - start;
   const auditId = writeAudit({
-    workspaceId: 'w-ops', actor: identity.name, source: 'user',
+    workspaceId, actor: identity.name, source: 'user',
     action: `exec.run · ${command}`, target: assetId,
     result: result.degraded ? '降级' : '放行', severity: result.degraded ? 'warn' : 'info',
-    detail: `dispatcher=${result.dispatcher} · exitCode=${result.exitCode} · spawnCount=${result.spawnCount} · 命令全文：${command}`,
+    detail: `dispatcher=${result.dispatcher} · exitCode=${result.exitCode} · spawnCount=${result.spawnCount} · 命令全文：${command}${workspaceNote}`,
   });
   return {
     executed: true,

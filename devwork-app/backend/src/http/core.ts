@@ -33,6 +33,9 @@ export const ERROR_STATUS: Record<string, number> = {
   E_ASSET_NOT_DB: 422,
   /* 本机没有 git 可执行文件：环境缺依赖，重试无用，但也不是请求本身错了。 */
   E_GIT_UNAVAILABLE: 503,
+  /* 请求体超过解析上限（body-parser 的 entity.too.large）：413 而不是 400，
+   * 前端据此提示「分批发送」，而不是让用户去改字段。 */
+  E_PAYLOAD_TOO_LARGE: 413,
   E_INTERNAL: 500,
 };
 

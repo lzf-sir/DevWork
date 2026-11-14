@@ -3,7 +3,7 @@ import { useStore } from '../store';
 import { api } from '../api/client';
 import { useLiveData } from '../api/live';
 import { useAssetTarget } from '../hooks/useAssetTarget';
-import { Banner, DetailHeader, DetailTabs, GearSvg, KV, MetricGrid, Pill } from '../components/ui';
+import { Banner, DetailHeader, DetailTabs, GearSvg, Pill } from '../components/ui';
 import { CaretIcon, ChatIcon, CloseIcon, CodeIcon, DotsIcon, FolderIcon, FileTypeIcon } from '../components/icons';
 import AssetConfigDrawer from '../components/AssetConfigDrawer';
 import { highlight, markAll } from '../utils/highlight';

@@ -12,17 +12,50 @@ import { CORS_ORIGINS, DIST_DIR, HOST, PORT, distExists, ensureDirs } from './co
 import { initDatabase, closeDatabase, ensureColumn, normalizeAuditActors, run, dropLegacyAccountTables } from './db/database';
 import { initDemoDatabase } from './db/demo';
 import { seedIfEmpty, migrateLegacySettings, ensureAgentV9Assets } from './db/seed';
-import { migrateCitations, migrateSourceReadPosition } from './db/migrate';
+import { migrateAboutVersion, migrateCitations, migratePermScopeMemory, migrateSourceReadPosition } from './db/migrate';
 import { bootstrapArtifacts, bootstrapRepo } from './sandbox/bootstrap';
 import { ensureFtsTable, runDocIndex, runIndex } from './services/indexer';
-import { initLogSink, appendLog } from './services/log-sink';
+import { initLogSink, appendLog, endLogSink } from './services/log-sink';
 import { registerRoutes } from './routes/index';
 import { startShadowScheduler, stopShadowScheduler, pruneShadowLedger } from './services/shadow-scheduler';
 import { startAgentLoop, stopAgentLoop } from './services/agent-loop';
 import { shellGate } from './http/shell-gate';
+import { ApiFailure, ERROR_STATUS, fail } from './http/core';
 import { detectDriver, driverDiagnosis } from './db/adapter';
 import { settingRaw } from './db/repositories';
 import { CLEAN_MODE } from './config';
+
+/* ---------------- 进程级兜底（必须在任何启动动作之前注册） ----------------
+ * 两个 handler 的策略**故意不同**，别合并成一个「都记录后继续」：
+ *
+ * ① unhandledRejection —— 记录后继续。未处理的拒绝通常只影响那一个请求
+ *    （Express 4 不会把它转给错误中间件，所以那个请求会挂到前端超时），
+ *    进程本身仍然可用。这条仍然**不能替代 wrap()**：它只保证「一个漏网的
+ *    async 路由不会带走整个后端」，不保证那个请求能拿到错误包络。
+ *    （handler 里拿不到对应的 req/res —— Node 只给 reason 与 promise，
+ *    所以「交给 next(err)」在进程级无法实现，只能在路由内用 try/catch 做。）
+ *
+ * ② uncaughtException —— 记录后**尽力关库并退出**。走到这里说明异常已经穿透了
+ *    所有同步调用栈，进程状态可能已损坏。继续跑会变成僵尸：`/api/health` 还答 200、
+ *    界面还在、数据永不更新 —— 比直接死难排查得多。重启由桌面壳负责（main.cjs）。
+ */
+process.on('unhandledRejection', (reason: unknown) => {
+  const detail = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+  // eslint-disable-next-line no-console
+  console.error('[DevWork] unhandledRejection（进程继续运行）:', detail);
+  appendLog('ERROR', `unhandledRejection：${detail}`);
+});
+process.on('uncaughtException', (error: Error) => {
+  const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+  // eslint-disable-next-line no-console
+  console.error('[DevWork] uncaughtException（进程将退出）:', detail);
+  appendLog('ERROR', `uncaughtException：${detail}`);
+  /* 尽力把 WAL 收干净再走：异常态下不能假设写入仍可用，所以整段吞异常。 */
+  try { closeDatabase(); } catch {
+    /* 关库失败也必须退出，不阻塞 */
+  }
+  process.exit(1);
+});
 
 /* ---------------- 启动前：运行时探测 + 数据层 ---------------- */
 ensureDirs();
@@ -35,8 +68,10 @@ if (driver === 'none') {
 initDatabase(seedIfEmpty);
 /* 旧版本的账号 / 成员 / 角色 / 策略表：账号体系已移除，这里清理残留。 */
 dropLegacyAccountTables();
-/* 派生管线需要 log / api 两类资产才能覆盖全部七组工具（幂等，老库也能补上）。 */
-ensureAgentV9Assets();
+/* 派生管线需要 log / api 两类资产才能覆盖全部七组工具（幂等，老库也能补上）。
+ * 干净模式跳过：这两个是演示资产（含连接/凭据/能力行），用户首启看到的应该是
+ * 「空环境，等我接入真实资源」，不是「已经接好了两个我看不懂的资产」。 */
+if (!CLEAN_MODE) ensureAgentV9Assets();
 /* log_query / srv_log_tail 的真实数据源：服务端请求日志沉降到文件。 */
 initLogSink();
 /* 老业务库补列：引用要能点回原文，就必须存源文件路径与行号。 */
@@ -104,6 +139,21 @@ const positionFix = migrateSourceReadPosition();
 if (positionFix.fixed > 0) {
   // eslint-disable-next-line no-console
   console.log(`[DevWork] 采集器位点整理：清理写坏位点 ${positionFix.fixed} 处`);
+}
+/* 审批档位曾有一个内核从未实现的「本会话内记住」：归一成真实生效的「按风险分级」，
+ * 否则设置页会展示一个承诺了记忆却毫无记忆行为的档位。 */
+const permScopeFix = migratePermScopeMemory();
+if (permScopeFix.changed) {
+  // eslint-disable-next-line no-console
+  console.log('[DevWork] 审批档位已归一：本会话内记住 → 按风险分级');
+}
+
+/* 版本单源：老库的 setting.about.version 只在首启 seed 时写过一次，
+ * 不覆盖的话升级后「关于」永远显示旧版本号（问不出出处的数字）。 */
+const aboutFix = migrateAboutVersion();
+if (aboutFix.changed) {
+  // eslint-disable-next-line no-console
+  console.log(`[DevWork] 关于页版本已对齐当前版本：${aboutFix.version}`);
 }
 
 /* ---------------- Express 应用 ---------------- */
@@ -213,24 +263,66 @@ if (distExists()) {
   });
 }
 
-/* 统一错误兜底（避免把异常裸奔到客户端）。 */
+/* 统一错误兜底（避免把异常裸奔到客户端）。
+ * 语义必须分开：body-parser 的 413 是「请求太大」，内部异常是「服务端故障」。
+ * 早前一律回 400「请求体解析失败」，等于把服务器炸了说成用户填错了。 */
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
   const message = error instanceof Error ? error.message : String(error);
   // eslint-disable-next-line no-console
   console.error('[DevWork] unhandled error:', message);
-  if (!res.headersSent) {
-    res.status(400).json({
-      ok: false, data: null,
-      error: { code: 'E_VALIDATION', message: `请求体解析失败：${message}` },
-      meta: { requestId: randomUUID(), ts: Date.now(), apiMode: 'live' },
-    });
+  if (res.headersSent) return;
+  /* body-parser 把超限标记在 error.type 上，不读它就只能靠文案猜。 */
+  if ((error as { type?: string } | null)?.type === 'entity.too.large') {
+    fail(res, 'E_PAYLOAD_TOO_LARGE', '请求体过大：请分批发送，或缩小附件后重试', 413);
+    return;
   }
+  /* 畸形 JSON 是**客户端**错误（400），不是服务端故障。body-parser 抛的是
+   * SyntaxError + type='entity.parse.failed'，不单独认它就会一路掉到 E_INTERNAL 500，
+   * 前端会把「我发错了」当成「服务器坏了」。
+   * 同族的编码 / 字符集 / 中断错误同样是「请求本身不合格」，一并按 400 处理；
+   * 413（entity.too.large）已在上一条返回，不会被这里抢走。 */
+  const parserType = String((error as { type?: string } | null)?.type ?? '');
+  const parseFailed = parserType === 'entity.parse.failed'
+    || parserType === 'entity.verify.failed'
+    || parserType === 'encoding.unsupported'
+    || parserType === 'charset.unsupported'
+    || parserType === 'request.aborted';
+  if (parseFailed) {
+    fail(res, 'E_VALIDATION', `请求体解析失败：${message}`, 400);
+    return;
+  }
+  /* 既有 ApiFailure 的 code / status 不被改写（403 不能变 500）。 */
+  if (error instanceof ApiFailure) {
+    fail(res, error.code, error.message, ERROR_STATUS[error.code], error.details);
+    return;
+  }
+  fail(res, 'E_INTERNAL', `服务端内部错误：${message}`, 500);
 });
 
 /* ---------------- 自启动独立进程 ---------------- */
 const server = app.listen(PORT, HOST, () => {
   // eslint-disable-next-line no-console
   console.log(`[DevWork] API listening on http://${HOST}:${PORT} · driver=${driver} · dist=${distExists() ? 'served' : 'dev-only'}`);
+});
+/**
+ * 监听失败（端口被占 / 无权限）属**启动失败**，不是「运行期异常」。
+ *
+ * 必须在这里显式处理：不加的话 EADDRINUSE 会冒到 uncaughtException 兜底里，
+ * 而那条路要关库、退出码也不一样；更糟的是万一被当成可恢复错误吞掉，
+ * 桌面壳就会「连上一个不存在的服务」—— 窗口正常打开、所有请求失败，
+ * 用户看到的是一堆 E_INTERNAL 而不是「端口 3001 被占用」。
+ */
+server.on('error', (error: NodeJS.ErrnoException) => {
+  const reason = error.code === 'EADDRINUSE'
+    ? `端口 ${PORT} 已被占用（可能还有一个 DevWork 后端在跑），请关闭它或改用 DEVWORK_PORT 指定其它端口`
+    : error.code === 'EACCES'
+      ? `没有权限监听 ${HOST}:${PORT}（端口小于 1024 需要管理员权限）`
+      : `监听 ${HOST}:${PORT} 失败：${error.message}`;
+  // eslint-disable-next-line no-console
+  console.error(`[DevWork] 启动失败 · ${reason}`);
+  appendLog('ERROR', `启动失败 · ${reason}`);
+  endLogSink();
+  process.exit(1);
 });
 
 let closing = false;
@@ -245,11 +337,14 @@ function shutdown(signal: string): void {
   const force = setTimeout(() => {
     // eslint-disable-next-line no-console
     console.warn('[DevWork] 关闭超时，强制退出');
+    /* 日志是异步追加流：退出前把缓冲刷出去，否则最后几行会丢。 */
+    endLogSink();
     process.exit(0);
   }, 3000);
   force.unref();
   server.close(() => {
     closeDatabase();
+    endLogSink();
     clearTimeout(force);
     // Windows 下 Electron 主进程等待这个 ack 才认定后端已优雅收尾。
     if (typeof process.send === 'function') {

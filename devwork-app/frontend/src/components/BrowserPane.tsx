@@ -57,8 +57,8 @@ export default function BrowserPane(): React.ReactElement {
   const [draft, setDraft] = useState<string>(url);
   const [history, setHistory] = useState<string[]>([]);
   const [cursor, setCursor] = useState<number>(-1);
-  const [canBack, setCanBack] = useState<boolean>(false);
-  const [canForward, setCanForward] = useState<boolean>(false);
+  /* 后退/前进按钮的可用态由 cursor 与 history 推导（见导航条 disabled），
+   * 这里不再另存一份 canBack/canForward —— 两份状态迟早不同步。 */
   const [source, setSource] = useState<'user' | 'agent' | 'none'>('none');
   const [note, setNote] = useState<string>('');
   /** Web 模式下强制重建 iframe 的 key（iframe 没有 reload API）。 */
@@ -151,19 +151,13 @@ export default function BrowserPane(): React.ReactElement {
     const onNavigate = (event: Event): void => {
       const target = event as Event & { url?: string };
       let next = target.url ?? '';
-      let back = false;
-      let forward = false;
       safeWebview((wv) => {
         next = next || wv.getURL();
-        back = wv.canGoBack();
-        forward = wv.canGoForward();
       });
       if (!next) return;
       currentRef.current = next;
       setBrowserUrl(next);
       setDraft(next);
-      setCanBack(back);
-      setCanForward(forward);
       void capturePage();
     };
     wv.addEventListener('did-navigate', onNavigate);

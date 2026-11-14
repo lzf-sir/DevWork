@@ -11,6 +11,7 @@ import path from 'node:path';
 import { resolveRepoRoot } from './workspace-repos';
 import { SENSITIVE_RULES } from '../config/rules';
 import { all, get, run, newId } from '../db/database';
+import { DEFAULT_WORKSPACE_ID } from '../config';
 
 const CHUNK_MAX_LINES = 40;
 /** 文档块更小：引用定位（locator）精确到行区间，块越大定位越糊。 */
@@ -170,7 +171,7 @@ function indexFile(
 }
 
 /** 重建代码资产索引：跳过 docs/（文档归知识库资产，避免同一片段被两个资产重复命中）。 */
-export function runIndex(assetId: string, workspaceId = 'w-ops'): { chunks: number; files: number } {
+export function runIndex(assetId: string, workspaceId = DEFAULT_WORKSPACE_ID): { chunks: number; files: number } {
   ensureFtsTable();
   let root: string;
   try {
@@ -191,7 +192,7 @@ export function runIndex(assetId: string, workspaceId = 'w-ops'): { chunks: numb
 
 /** 重建知识库资产索引：只扫 docs/，kind='doc'，块更小以便引用定位更精确。
  *  这是 P0「引用落点必须真实存在」的落地点：索引内容全部来自磁盘文件。 */
-export function runDocIndex(assetId = 'a-kb', workspaceId = 'w-ops'): { chunks: number; files: number } {
+export function runDocIndex(assetId = 'a-kb', workspaceId = DEFAULT_WORKSPACE_ID): { chunks: number; files: number } {
   ensureFtsTable();
   let root: string;
   try {

@@ -12,6 +12,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { DATA_DIR } from '../config';
 import { rotateLog, readLogLines } from '../services/log-sink';
 import { resolveRepoRoot } from '../services/workspace-repos';
 
@@ -173,14 +174,18 @@ async function handleBackupFile(assetId: string, filled: Record<string, string |
   if (!source.startsWith(root) || !fs.existsSync(source) || !fs.statSync(source).isFile()) {
     return { ok: false, stdout: `备份失败：${rel} 不存在或越界（未产生写操作）` };
   }
-  const snapshotDir = path.join(root, '.devwork-snapshots');
+  /* 快照落运行时数据目录，与 write-executor 同源：写进用户仓库的
+   * `.devwork-snapshots/` 会让 `git status` 变脏、还可能被误提交
+   * （「你的仓库不被我弄脏」是写能力的第一信任前提）。 */
+  const snapshotDir = path.join(DATA_DIR, 'snapshots', assetId.replace(/[^\w-]/g, '_'));
   fs.mkdirSync(snapshotDir, { recursive: true });
   const snapshotPath = path.join(snapshotDir, `${Date.now()}-${path.basename(rel)}`);
   fs.copyFileSync(source, snapshotPath);
   return {
     ok: true,
-    stdout: `备份完成：${rel} → ${path.relative(root, snapshotPath).replace(/\\/g, '/')}（${fs.statSync(source).size} 字节）`,
-    rollbackRef: JSON.stringify({ kind: 'file-snapshot', snapshotPath, targetPath: source }),
+    stdout: `备份完成：${rel} → snapshots/${path.basename(snapshotDir)}/${path.basename(snapshotPath)}（${fs.statSync(source).size} 字节）`,
+    /* assetId 必须进回滚引用：回滚端点要用它断言「目标仍在该资产仓库根内」。 */
+    rollbackRef: JSON.stringify({ kind: 'file-snapshot', snapshotPath, targetPath: source, assetId }),
   };
 }
 

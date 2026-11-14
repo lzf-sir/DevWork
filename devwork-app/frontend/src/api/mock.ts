@@ -534,7 +534,14 @@ export function mockFallthrough<T>(method: HttpMethod, path: string, body?: unkn
   const fail = (code: string, message: string): ApiEnvelope<T> => mockFail<T>(code, message);
 
   if (clean === '/health') {
-    return data({ status: 'ok', driver: 'node:sqlite', wal: true, version: '0.4.2-mock', time: new Date().toISOString() });
+    /* 版本号取编译期注入的 __APP_VERSION__（vite.config.ts 由 package.json 注入），
+     * 不再手写一份 —— 手写过一次旧版本号，发版时 mock 态还在报旧版本。
+     * `-mock` 后缀必须保留：它是「这份数据来自离线兜底而非真实后端」的唯一标记，
+     * 去掉就会让 mock 态看起来像真实版本。 */
+    return data({
+      status: 'ok', driver: 'node:sqlite', wal: true,
+      version: `${__APP_VERSION__}-mock`, time: new Date().toISOString(),
+    });
   }
   if (clean === '/bootstrap') {
     const id = query.get('workspaceId') ?? 'w-ops';
@@ -547,8 +554,10 @@ export function mockFallthrough<T>(method: HttpMethod, path: string, body?: unkn
   }
   if (clean === '/workspaces' && method === 'GET') return data(PROJECTS.map((p) => workspaceShape(p.id)));
   if (clean === '/workspaces' && method === 'POST') {
+    /* 新建后立刻回显用户起的名字：演示形状来自 PROJECTS，名称要按入参覆盖，
+     * 否则界面上新工作区会叫第一个演示项目的名字。 */
     const name = String(payload.name ?? '新项目');
-    return data(workspaceShape('w-new'));
+    return data({ ...workspaceShape('w-new'), name });
   }
   if (/^\/workspaces\/[^/]+\/switch$/.test(clean) && method === 'POST') {
     const id = clean.split('/')[2];

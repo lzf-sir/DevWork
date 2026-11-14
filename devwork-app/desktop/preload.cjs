@@ -47,6 +47,14 @@ contextBridge.exposeInMainWorld('desktop', {
    */
   isPackaged: () => ipcRenderer.invoke('app:is-packaged'),
   /**
+   * 启动失败页的「重试」按钮。
+   *
+   * 错误页是主进程 loadURL 的 data:text/html 静态页，它唯一能做的事就是
+   * 请求主进程「再试一次」：主进程会重新探活 3001，必要时重启后端子进程，
+   * 就绪后把窗口切回真实页面。渲染进程拿不到任何进程/文件能力，只有这一条授权动作。
+   */
+  restartBackend: () => ipcRenderer.invoke('app:restart-backend'),
+  /**
    * 开发者模式：切换 DevTools（停靠右侧）。
    * 返回切换后的状态（true=已打开），与 devtools-opened/closed 事件保持一致。
    */

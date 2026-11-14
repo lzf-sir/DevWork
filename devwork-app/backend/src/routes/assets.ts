@@ -11,7 +11,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ApiFailure, fail, identity, ok, queryString, wrap } from '../http/core';
-import { all, get, run, writeAudit, newId, nowIso } from '../db/database';
+import { AUDIT_GLOBAL_SCOPE, all, get, run, writeAudit, newId, nowIso } from '../db/database';
 import { demoDb } from '../db/database';
 import {
   allPanels,
@@ -80,7 +80,7 @@ import {
 } from '../services/conversation';
 import { bootstrapArtifacts, artifactPath, artifactSize } from '../sandbox/bootstrap';
 import { normalizeBrowserUrl, readBrowserPage, readBrowserState, writeBrowserPage, writeBrowserState } from '../services/browser';
-import { PORT } from '../config';
+import { DEFAULT_WORKSPACE_ID, PORT } from '../config';
 
 type Row = Record<string, unknown>;
 import { body, optionalId, requireRow, requireAssetId } from './helpers';
@@ -90,7 +90,7 @@ import { assetCreateSchema } from '../../../shared/contracts';
 
 export function registerAssetRoutes(app: Express): void {
   app.get('/api/assets', wrap(async (req: Request, res: Response) => {
-    const workspaceId = queryString(req, 'workspaceId', 'w-ops');
+    const workspaceId = queryString(req, 'workspaceId', DEFAULT_WORKSPACE_ID);
     const type = queryString(req, 'type');
     const rows = type
       ? all<Row>('SELECT * FROM asset WHERE workspace_id = ? AND type = ?', workspaceId, type)
@@ -106,7 +106,7 @@ export function registerAssetRoutes(app: Express): void {
      * 失败抛 E_VALIDATION（HTTP 400），不会走到下面的清洗与落库。 */
     const payload = parseBody(assetCreateSchema, req);
     const id = newId('a');
-    const workspaceId = String(payload.workspaceId ?? 'w-ops');
+    const workspaceId = String(payload.workspaceId ?? DEFAULT_WORKSPACE_ID);
     const type = String(payload.type ?? 'code');
     const name = String(payload.name ?? '新资产').trim();
     if (!name) throw new ApiFailure('E_VALIDATION', '资产名称不能为空');
@@ -367,7 +367,8 @@ export function registerAssetRoutes(app: Express): void {
     run('UPDATE asset SET index_progress = ?, status = ? WHERE id = ?', 100, 'online', assetId);
     const asset = get<{ name: string; workspace_id: string }>('SELECT name, workspace_id FROM asset WHERE id = ?', assetId);
     writeAudit({
-      workspaceId: String(asset?.workspace_id ?? 'w-ops'), actor: who.name, source: 'user',
+      /* 归属来自刚查的资产行；查不到就记全局 —— 审计绝不回落到默认工作区。 */
+      workspaceId: String(asset?.workspace_id ?? '') || AUDIT_GLOBAL_SCOPE, actor: who.name, source: 'user',
       action: result.action === 'pulled' ? 'repo.pull' : 'repo.clone',
       target: String(asset?.name ?? assetId),
       result: '成功',

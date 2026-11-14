@@ -34,6 +34,14 @@ export interface Health {
   wal: boolean;
   version: string;
   time: string;
+  /**
+   * 内网访问开关（`DEVWORK_BROWSER_ALLOW_PRIVATE=1`）当前是否生效。
+   *
+   * 声明为**可选**是诚实的做法：后端未上报时是 `undefined`，前端必须显示
+   * 「未上报」而不是默认 `false` —— 否则 env 开着的时候界面会说"未开启"，
+   * 那是我们这一轮一直在修的那类"界面说谎"。
+   */
+  browserAllowPrivate?: boolean;
 }
 
 export interface Bootstrap {
@@ -1331,7 +1339,10 @@ export interface ApiClient {
     conversationId: string,
     messageId: string,
     decision: 'approve' | 'deny',
-    /** scope=session：批准并登记会话级审批记忆（键=intent+targetType+risk，不含参数）。 */
+    /**
+     * 1.0 一律 `once`：后端按单次批准处理，`'session'` 仅为兼容旧客户端保留（不生效）。
+     * 前端不要再提供会话级免审入口 —— 点了不生效的按钮等于界面说谎。
+     */
     scope?: 'once' | 'session',
   ): Promise<ApiEnvelope<MessageCard>>;
   /** 回滚闸门：按审批卡 payload.rollbackRef 执行恢复（仅已批准且产生了回滚引用的卡）。 */

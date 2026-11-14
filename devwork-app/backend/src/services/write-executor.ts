@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
+import { DATA_DIR } from '../config';
 import { resolve as resolveRepoPath } from './file-service';
 import { resolveRepoRoot } from './workspace-repos';
 import { runSqlWrite, restoreDbBackup } from './sql-write';
@@ -68,12 +69,19 @@ async function repoFileList(assetId: string): Promise<string[]> {
 
 /* ---------------- code_edit / fs_write_file：文件写 ---------------- */
 
+/** 快照目录的唯一计算处：运行时数据目录下的 snapshots/<conversationId>。 */
+function snapshotDirOf(conversationId: string): string {
+  const safe = String(conversationId || 'adhoc').replace(/[^\w-]/g, '_');
+  return path.join(DATA_DIR, 'snapshots', safe);
+}
+
 export async function executeFileWrite(
   assetId: string,
   rel: string,
   content: string,
   identity: Identity,
   workspaceId: string,
+  conversationId = '',
 ): Promise<WriteOutcome> {
   /* precheck 1：路径边界 + 敏感规则（file-service.resolve 统一裁决）。 */
   let absolute: string;
@@ -86,12 +94,15 @@ export async function executeFileWrite(
       diskChanged: false,
     };
   }
-  /* precheck 2：读取基线并做快照（回滚就绪）。 */
+  /* precheck 2：读取基线并做快照（回滚就绪）。
+   * 快照必须落在运行时数据目录（DATA_DIR/snapshots/<conversationId>/）：
+   * 此前写在用户仓库里的 .devwork-snapshots/，会污染 `git status`、可能被误提交 ——
+   * 而「你的仓库不被我弄脏」是写能力的第一信任前提（审计 A-P2-15）。 */
   let before: string | null = null;
   try {
     if (fs.existsSync(absolute)) before = fs.readFileSync(absolute, 'utf8');
   } catch { before = null; }
-  const snapshotDir = path.join(path.resolve(await resolveRepoRoot(assetId)), '.devwork-snapshots');
+  const snapshotDir = snapshotDirOf(conversationId);
   try {
     fs.mkdirSync(snapshotDir, { recursive: true });
     const snapshotPath = path.join(snapshotDir, `${Date.now()}-${path.basename(rel)}`);
@@ -111,10 +122,11 @@ export async function executeFileWrite(
     return {
       ok,
       message: ok
-        ? `文件已写入：${rel}（${buffer.length} 字节）。基线快照保留在 .devwork-snapshots/，可通过回滚端点恢复。`
+        ? `文件已写入：${rel}（${buffer.length} 字节）。基线快照保留在运行时数据目录（snapshots/${path.basename(snapshotDir)}/），可通过回滚端点恢复。`
         : `写入后校验失败：重读内容与预期不一致（罕见，检查磁盘）`,
+      /* 回滚引用存**绝对路径** + 资产 id：回滚时要靠 assetId 断言目标仍在仓库根内。 */
       rollbackRef: before !== null
-        ? JSON.stringify({ kind: 'file-snapshot', snapshotPath, targetPath: absolute })
+        ? JSON.stringify({ kind: 'file-snapshot', snapshotPath, targetPath: absolute, assetId })
         : undefined,
       diskChanged: true,
     };
@@ -284,8 +296,29 @@ export async function rollbackWritePlan(
     case 'file-snapshot': {
       const snapshotPath = String(ref.snapshotPath ?? '');
       const targetPath = String(ref.targetPath ?? '');
+      const assetId = String(ref.assetId ?? '');
       if (!fs.existsSync(snapshotPath)) {
         return { ok: false, message: '快照文件不存在，无法恢复' };
+      }
+      /* 回滚是「把内容拷回某个路径」——拷贝目标必须落在该资产仓库根内。
+       * rollbackRef 目前由服务端生成、用户不可直接注入，所以当前不可利用；
+       * 但缺了这道断言，将来只要它多一个入口就是任意文件覆盖（审计 A-P2-16）。 */
+      let inside = false;
+      try {
+        const root = path.resolve(resolveRepoRoot(assetId));
+        const target = path.resolve(targetPath);
+        inside = target === root || target.startsWith(`${root}${path.sep}`);
+      } catch {
+        /* 拿不到仓库根（资产已删 / 目录不存在）→ 不放行。 */
+        inside = false;
+      }
+      if (!inside) {
+        await auditWrite({
+          workspaceId, actor: identity.name, action: 'write.rollback · file-snapshot', target: targetPath,
+          result: '拦截', severity: 'warn',
+          detail: `E_PATH_ESCAPE：回滚目标不在资产（${assetId || '未知'}）仓库根内，已拒绝拷贝`,
+        });
+        return { ok: false, message: 'E_PATH_ESCAPE：回滚目标不在该资产仓库根目录内，已拒绝（未覆盖任何文件）' };
       }
       fs.copyFileSync(snapshotPath, targetPath);
       await auditWrite({

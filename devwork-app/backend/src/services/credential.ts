@@ -7,8 +7,9 @@
  * credential_binding 的普通列里，方便详情页显示「绑的是谁、用哪种方式」。
  */
 import { ApiFailure, type Identity } from '../http/core';
-import { get, run, writeAudit } from '../db/database';
+import { AUDIT_GLOBAL_SCOPE, get, run, writeAudit } from '../db/database';
 import { credentialShape } from '../db/repositories';
+import { resolveWorkspaceIdForAsset } from './workspace-repos';
 import { check, kernelIdentity } from '../kernel/permission';
 import { loadSecret, storeSecret } from './secret-store';
 
@@ -24,7 +25,9 @@ export function requireCredential(assetId: string, identity: Identity): { state:
   if (state === 'expired') throw new ApiFailure('E_CREDENTIAL_EXPIRED', '凭据已过期，请轮换后重试');
   if (state === 'revoked') throw new ApiFailure('E_CREDENTIAL_REVOKED', '凭据已吊销，请重新绑定');
   check({
-    actor: 'user', action: 'credential.bind', risk: 'medium', workspaceId: 'w-ops', assetId,
+    /* 权限判定的归属跟着资产走：凭据属于某条资产，资产归属才是真实归属。 */
+    actor: 'user', action: 'credential.bind', risk: 'medium',
+    workspaceId: resolveWorkspaceIdForAsset(assetId) || AUDIT_GLOBAL_SCOPE, assetId,
   }, kernelIdentity(identity));
   return { state, label: String(shape.label) };
 }
@@ -63,7 +66,7 @@ function setState(
     );
   }
   writeAudit({
-    workspaceId: 'w-ops', actor: identity.name, source: 'user',
+    workspaceId: resolveWorkspaceIdForAsset(assetId) || AUDIT_GLOBAL_SCOPE, actor: identity.name, source: 'user',
     action: `credential.${state}`, target: assetId, result: '成功', severity: 'info',
     /* 审计只记方式与账号，绝不记秘密本身。 */
     detail: `凭据状态变更为 ${state}`
@@ -79,7 +82,9 @@ export async function bind(
   identity: Identity,
 ): Promise<Record<string, unknown>> {
   const verdict = check({
-    actor: 'user', action: 'credential.bind', risk: 'medium', workspaceId: 'w-ops', assetId,
+    /* 同上：绑定前的能力判定也按资产归属记，不写死默认工作区。 */
+    actor: 'user', action: 'credential.bind', risk: 'medium',
+    workspaceId: resolveWorkspaceIdForAsset(assetId) || AUDIT_GLOBAL_SCOPE, assetId,
   }, kernelIdentity(identity));
   if (verdict.effect === 'deny') {
     throw new ApiFailure('E_PERMISSION_DENIED', '当前操作被权限策略拒绝');

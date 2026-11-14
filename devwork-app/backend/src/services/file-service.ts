@@ -11,7 +11,7 @@ import { execFileSync } from 'node:child_process';
 import { ApiFailure, type Identity } from '../http/core';
 import { isSensitive } from '../db/repositories';
 import { newId, writeAudit } from '../db/database';
-import { resolveRepoRoot, assetWorkspaceId } from './workspace-repos';
+import { resolveRepoRoot, resolveWorkspaceIdForAsset } from './workspace-repos';
 import { check, kernelIdentity } from '../kernel/permission';
 
 export interface SaveResult {
@@ -63,7 +63,11 @@ export async function resolve(assetId: string, rel: string): Promise<string> {
 /** 用户手动保存：唯一真实写。先过 kernel（actor=user 恒 allow），再落盘，写 1 条审计。 */
 export async function save(assetId: string, rel: string, content: string, identity: Identity): Promise<SaveResult> {
   const absolute = await resolve(assetId, rel);
-  const workspaceId = await assetWorkspaceId(assetId);
+  /* 审计归属用「资产真实归属」，拿不到就记空串 + workspace:unknown。
+   * assetWorkspaceId() 是路径解析专用的（查不到给空串），它表达不了「不认识」，
+   * 拿它填审计只会把这个判断推给调用点，迟早有人在那里补一个默认值。 */
+  const workspaceId = resolveWorkspaceIdForAsset(assetId) ?? '';
+  const workspaceNote = workspaceId === '' ? ' · workspace:unknown' : '';
   const verdict = await check({
     actor: 'user', action: 'file.write', risk: 'high', workspaceId, assetId, path: rel,
   }, kernelIdentity(identity));
@@ -76,7 +80,7 @@ export async function save(assetId: string, rel: string, content: string, identi
   const auditId = writeAudit({
     workspaceId, actor: identity.name, source: 'user',
     action: 'file.save · 用户手动保存', target: rel, result: '放行', severity: 'info',
-    detail: `真实落盘 ${buffer.length} 字节 · diskChanged=true`,
+    detail: `真实落盘 ${buffer.length} 字节 · diskChanged=true${workspaceNote}`,
   });
   return { path: rel, bytesWritten: buffer.length, diskChanged: true, auditId };
 }
@@ -85,14 +89,15 @@ export async function save(assetId: string, rel: string, content: string, identi
 export async function agentWrite(assetId: string, rel: string, patch: string, identity: Identity): Promise<AgentWriteResult> {
   // 只做路径合法性检查，不触碰磁盘（连 open 都不做）。
   await resolve(assetId, rel);
-  const workspaceId = await assetWorkspaceId(assetId);
+  const workspaceId = resolveWorkspaceIdForAsset(assetId) ?? '';
+  const workspaceNote = workspaceId === '' ? ' · workspace:unknown' : '';
   const verdict = await check({
     actor: 'agent', action: 'file.write', risk: 'high', workspaceId, assetId, path: rel, payload: { patch },
   }, { identityName: 'Agent', source: 'agent' });
   const auditId = writeAudit({
     workspaceId, actor: 'Agent', source: 'agent',
     action: 'file.agent-write · 已拦截', target: rel, result: '拦截', severity: 'warn',
-    detail: `Agent 写操作恒拒绝 · bytesWritten=0 · diskChanged=false · auditId=${verdict.auditId} · 操作者=${identity.name}`,
+    detail: `Agent 写操作恒拒绝 · bytesWritten=0 · diskChanged=false · auditId=${verdict.auditId} · 操作者=${identity.name}${workspaceNote}`,
   });
   return {
     decision: 'deny',
@@ -170,22 +175,46 @@ export interface FileOutlineResult {
   symbols: OutlineSymbol[];
   references: string[];
   git: string[];
+  /**
+   * 引用扫描是否被截断（文件数 / 目录深度 / 单文件读取上限）。
+   * 必须如实上报：不标 `truncated` 的「被 N 个文件引用」会被当成全仓事实。
+   */
+  truncated: boolean;
 }
 
-/** 递归收集仓库内非敏感文件（跳过 .git）。 */
-function repoFiles(root: string, out: string[] = []): string[] {
+/** 仓库遍历上限：与 fileTree 同一口径，防「接了个万级文件仓库就卡死」。 */
+const TREE_MAX_DEPTH = 8;
+const TREE_MAX_ENTRIES = 2000;
+/** 引用扫描只要「有没有出现符号名」，读前 256KB 足够，不必整个文件进内存。 */
+const REFERENCE_SCAN_BYTES = 256 * 1024;
+
+interface RepoFilesResult {
+  files: string[];
+  truncated: boolean;
+}
+
+/** 递归收集仓库内非敏感文件（跳过 .git / node_modules），带上限。 */
+function repoFiles(root: string, out: string[] = [], depth = 0, state = { truncated: false }): RepoFilesResult {
+  if (depth > TREE_MAX_DEPTH) {
+    state.truncated = true;
+    return { files: out, truncated: state.truncated };
+  }
   let names: string[] = [];
-  try { names = fs.readdirSync(root); } catch { return out; }
+  try { names = fs.readdirSync(root); } catch { return { files: out, truncated: state.truncated }; }
   for (const name of names) {
+    if (out.length >= TREE_MAX_ENTRIES) {
+      state.truncated = true;
+      break;
+    }
     if (name === '.git' || name === 'node_modules') continue;
     const absolute = path.join(root, name);
     const rel = path.relative(root, absolute).replace(/\\/g, '/');
     let stat: fs.Stats;
     try { stat = fs.statSync(absolute); } catch { continue; }
-    if (stat.isDirectory()) repoFiles(absolute, out);
+    if (stat.isDirectory()) repoFiles(absolute, out, depth + 1, state);
     else if (!isSensitive(rel)) out.push(rel);
   }
-  return out;
+  return { files: out, truncated: state.truncated };
 }
 
 export async function fileOutline(assetId: string, rel: string): Promise<FileOutlineResult> {
@@ -217,17 +246,41 @@ export async function fileOutline(assetId: string, rel: string): Promise<FileOut
   });
   if (symbols.length === 0) symbols.push({ sg: 'X', label: path.basename(rel), line: 1 });
 
-  /* 引用真扫：除本文件外，其他仓库文件中出现符号名即计一次引用。 */
+  /* 引用真扫：除本文件外，其他仓库文件中出现符号名即计一次引用。
+   * 这一段的代价是「同步遍历 + 逐文件读」，请求期间会占住 Node 主线程 ——
+   * 所以必须**有界**：文件数上限 + 每文件只读前 256KB + 命中够多就停。
+   * 超限时如实返回 truncated=true，前端据此显示「扫描已截断」。 */
   const names = symbols.map((s) => s.label.replace(/\(\.\.\.\)$/, '')).filter((n) => n.length > 3);
   const referencingFiles = new Set<string>();
-  for (const other of repoFiles(root)) {
+  const tree = repoFiles(root);
+  let truncated = tree.truncated;
+  for (const other of tree.files) {
     if (other === rel) continue;
     let content = '';
-    try { content = fs.readFileSync(path.join(root, other), 'utf8'); } catch { continue; }
+    try {
+      const absoluteOther = path.join(root, other);
+      const size = fs.statSync(absoluteOther).size;
+      if (size > REFERENCE_SCAN_BYTES) truncated = true;
+      const fd = fs.openSync(absoluteOther, 'r');
+      try {
+        const buffer = Buffer.alloc(Math.min(size, REFERENCE_SCAN_BYTES));
+        fs.readSync(fd, buffer, 0, buffer.length, 0);
+        content = buffer.toString('utf8');
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch { continue; }
     if (names.some((name) => content.includes(name))) referencingFiles.add(other);
+    /* 只要给出前几个例子，再往下扫只是浪费主线程时间。 */
+    if (referencingFiles.size >= 50) {
+      truncated = truncated || tree.files.length > referencingFiles.size + 1;
+      break;
+    }
   }
   const references = [
-    `被 ${referencingFiles.size} 个文件引用`,
+    truncated
+      ? `被至少 ${referencingFiles.size} 个文件引用（扫描已截断：仅前 ${TREE_MAX_ENTRIES} 个文件、每文件前 ${Math.round(REFERENCE_SCAN_BYTES / 1024)}KB）`
+      : `被 ${referencingFiles.size} 个文件引用`,
     ...(referencingFiles.size > 0 ? Array.from(referencingFiles).slice(0, 3).map((f) => `· ${f}`) : []),
   ];
 
@@ -248,7 +301,7 @@ export async function fileOutline(assetId: string, rel: string): Promise<FileOut
     try { mtime = fs.statSync(absolute).mtime.toISOString().slice(0, 10); } catch { mtime = ''; }
     git = [mtime ? `最后落盘 ${mtime}` : '无 git 历史', 'git 不可用 · 本机文件时间'];
   }
-  return { symbols, references, git };
+  return { symbols, references, git, truncated };
 }
 
 /** 真实 git diff（B19）：对 HEAD 的工作区变更；git 不可用时如实报错。 */

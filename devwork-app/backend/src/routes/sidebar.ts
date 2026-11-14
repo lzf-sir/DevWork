@@ -11,7 +11,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ApiFailure, fail, identity, ok, queryString, wrap } from '../http/core';
-import { all, get, run, writeAudit, newId, nowIso } from '../db/database';
+import { AUDIT_GLOBAL_SCOPE, all, get, run, writeAudit, newId, nowIso } from '../db/database';
 import { demoDb } from '../db/database';
 import {
   allPanels,
@@ -80,16 +80,16 @@ import {
 } from '../services/conversation';
 import { bootstrapArtifacts, artifactPath, artifactSize } from '../sandbox/bootstrap';
 import { normalizeBrowserUrl, readBrowserPage, readBrowserState, writeBrowserPage, writeBrowserState } from '../services/browser';
-import { PORT } from '../config';
+import { DEFAULT_WORKSPACE_ID, PORT } from '../config';
 
 type Row = Record<string, unknown>;
-import { body, optionalId, requireRow } from './helpers';
+import { body, optionalId, requireRow, workspaceGuard } from './helpers';
 import { parseBody } from '../http/validate';
 import { folderCreateSchema, folderPatchSchema, folderReorderSchema, itemsMoveSchema } from '../../../shared/contracts';
 
 export function registerSidebarRoutes(app: Express): void {
   app.get('/api/sidebar', wrap(async (req: Request, res: Response) => {
-    const workspaceId = queryString(req, 'workspaceId', 'w-ops');
+    const workspaceId = queryString(req, 'workspaceId', DEFAULT_WORKSPACE_ID);
     requireRow(await workspaceById(workspaceId), '工作区');
     ok(res, await sidebarShape(workspaceId));
   }));
@@ -99,7 +99,7 @@ export function registerSidebarRoutes(app: Express): void {
 
   /* ---------------- G2 文件夹 ---------------- */
   app.get('/api/folders', wrap(async (req: Request, res: Response) => {
-    const workspaceId = queryString(req, 'workspaceId', 'w-ops');
+    const workspaceId = queryString(req, 'workspaceId', DEFAULT_WORKSPACE_ID);
     const kind = queryString(req, 'kind', 'asset');
     ok(res, (all<Row>(
       'SELECT * FROM folder WHERE workspace_id = ? AND kind = ? ORDER BY sort_order',
@@ -113,7 +113,7 @@ export function registerSidebarRoutes(app: Express): void {
   }));
   app.post('/api/folders', wrap(async (req: Request, res: Response) => {
     const payload = parseBody(folderCreateSchema, req);
-    const workspaceId = String(payload.workspaceId ?? 'w-ops');
+    const workspaceId = String(payload.workspaceId ?? DEFAULT_WORKSPACE_ID);
     const kind = String(payload.kind ?? 'asset');
     const name = String(payload.name ?? '').trim() || '新建文件夹';
     const parentId = optionalId(payload.parentId);
@@ -236,7 +236,8 @@ export function registerSidebarRoutes(app: Express): void {
     }
     run(`UPDATE ${table} SET folder_id = ? WHERE id = ?`, targetFolderId, itemId);
     writeAudit({
-      workspaceId: 'w-ops', actor: (await identity(req)).name, source: 'user',
+      /* 移动条目属于「当前工作区」的动作：请求没声明就记全局，不伪装成 w-ops。 */
+      workspaceId: workspaceGuard(req) || AUDIT_GLOBAL_SCOPE, actor: (await identity(req)).name, source: 'user',
       action: 'item.move', target: itemId, result: '成功', severity: 'info',
       detail: targetFolderId ? `移动到文件夹 ${targetFolderId}` : '移出文件夹',
     });

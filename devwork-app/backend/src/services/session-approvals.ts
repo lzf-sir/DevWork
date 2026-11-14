@@ -24,6 +24,13 @@ export function approvalKeyOf(action: string, targetType: string, risk: string):
   return `${action}|${targetType}|${risk}`;
 }
 
+/**
+ * 1.0 已下线，仅保留给未来版本；当前无调用方（respondApproval 不再 grant）。
+ *
+ * 不删函数的原因：`tests/agent-tools.mjs:261` 仍用它验证记忆键与连续拒绝熔断的底层行为，
+ * 直接删会打断测试。若要恢复会话免审，必须同时恢复三处：前端入口
+ * + respondApproval 里的 grant 调用 + shared/contracts 的口径说明，缺一不可。
+ */
 export function grantSessionApproval(conversationId: string, key: ApprovalKey): void {
   const set = sessionGrants.get(conversationId) ?? new Set<ApprovalKey>();
   set.add(key);

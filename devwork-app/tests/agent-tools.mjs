@@ -350,8 +350,15 @@ console.log('\n--- D. HTTP 集成 ---');
       const secondWrite = await call('POST', `/api/conversations/${convId}/messages`, { content: '再清理一次日志', assetIds: [] });
       const rows = (secondWrite.data?.messages ?? []).filter((m) => ['tool_row', 'approval_card', 'suggestion'].includes(m.kind));
       const memoryHit = rows.some((m) => String(m.payload?.result ?? '').includes('会话级审批记忆'));
-      check('D7 同类写操作命中会话级审批记忆（记忆键不含参数）', memoryHit,
-        rows.map((m) => `${m.kind}:${short(String(m.payload?.result ?? ''), 60)}`).join(' | '));
+      /* 1.0 口径（审计 A-P1-09 方案 A）：会话级免审下线 —— 上一张卡带 scope:'session'
+       * 批准，也不得为后续同类写操作留免审记忆。判定反过来断言：
+       * 「没有记忆命中」且「仍然产生了审批/建议卡（逐次批准）」，
+       * 并且裁决返回的生效口径必须是 once。 */
+      const reApproval = rows.some((m) => m.kind === 'approval_card' || m.kind === 'suggestion' || m.kind === 'tool_row');
+      check('D7 会话级免审已下线：同类写操作仍逐次审批（且回报 scope=once）',
+        !memoryHit && reApproval && decided.data?.scope === 'once',
+        `memoryHit=${memoryHit} reApproval=${reApproval} scope=${decided.data?.scope} | `
+          + rows.map((m) => `${m.kind}:${short(String(m.payload?.result ?? ''), 40)}`).join(' | '));
 
       await call('DELETE', `/api/conversations/${convId}`);
     }
