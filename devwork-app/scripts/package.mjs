@@ -218,6 +218,24 @@ if (fs.existsSync(unpackedModules)) {
     ok('产物内后端运行时依赖齐备（resources/server/node_modules）');
   }
 
+  /* 主进程启动前会先探这三样：缺 tsx preflight/loader → 报「未找到 tsx 运行时」，
+   * 缺 server/src/index.ts → 报「未找到服务端入口」，缺 dist → 窗口打开是白屏。
+   * 这三条一旦漏抽，产物目录里 DevWork.exe 还在，看起来像正常的构建，
+   * 双击才炸 —— 所以必须在打包阶段就拦住（本次缺口就是这样被带出去的）。 */
+  const bootRequired = [
+    ['服务端入口', path.join(unpacked, 'server', 'src', 'index.ts')],
+    ['tsx preflight', path.join(unpacked, 'server', 'node_modules', 'tsx', 'dist', 'preflight.cjs')],
+    ['tsx loader', path.join(unpacked, 'server', 'node_modules', 'tsx', 'dist', 'loader.mjs')],
+    ['前端 index.html', path.join(unpacked, 'dist', 'index.html')],
+  ];
+  const bootAbsent = bootRequired.filter(([, file]) => !fs.existsSync(file)).map(([label]) => label);
+  if (bootAbsent.length > 0) {
+    fail(`产物缺少启动必需文件：${bootAbsent.join(' / ')}（双击会停在后端起不来的错误页）`);
+    missing += 1;
+  } else {
+    ok('产物启动必需文件齐备（服务端入口 / tsx / 前端 index.html）');
+  }
+
   /* shared 的 ESM 上下文 + 解析链依赖。 */
   const productSharedPkg = path.join(unpacked, 'shared', 'package.json');
   let productSharedType = '';
@@ -292,6 +310,25 @@ function pickOutputDir() {
   const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
   const fallback = path.join(RELEASE, `build-${stamp}`);
   warn(`上一次的产物目录被占用（通常是杀软正在扫描），本次输出到 ${fallback}`);
+  /* 删不干净的 `release/build` 是最坏的形态：exe 还在、resources 只剩空壳，
+   * 桌面快捷方式指过去照样能启动，但主进程立刻报「未找到 tsx 运行时」——
+   * 和真的缺文件一模一样，排查会被带偏。这里留一张显眼的说明，
+   * 让「按默认路径双击」的人一眼看出这不是本次产物。 */
+  try {
+    const leftover = path.join(preferred, 'win-unpacked');
+    fs.mkdirSync(leftover, { recursive: true });
+    fs.writeFileSync(
+      path.join(leftover, '【不完整产物-请勿运行】.txt'),
+      [
+        '这个目录是上一次打包被中断 / 被杀软占用后留下的残骸，内容不完整。',
+        `本次真正的产物在：${fallback}`,
+        '要恢复默认路径：关掉所有 DevWork 进程后重新运行 npm run pack:dir。',
+      ].join('\r\n'),
+      'utf8',
+    );
+  } catch {
+    /* 连说明都写不进去，说明目录被硬占着 —— 已经有 warn 提示，不再升级成失败。 */
+  }
   return fallback;
 }
 

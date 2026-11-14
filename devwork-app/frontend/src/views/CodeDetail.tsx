@@ -106,6 +106,13 @@ export default function CodeDetail(): React.ReactElement {
   useEffect(() => {
     let cancelled = false;
     setLiveContent({});
+    /* 没有选中资产（打包态首屏就是这种）时不要发 `/assets//...`：
+     * 空 id 只会换来一串 404，界面本来也没有可渲染的树。 */
+    if (!assetId) {
+      setTree([]);
+      setRepo(null);
+      return () => { cancelled = true; };
+    }
     void api.getFileTree(assetId).then((envelope) => {
       if (cancelled || !envelope.ok) return;
       const nodes: TreeNode[] = envelope.data.map((n) => ({

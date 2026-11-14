@@ -351,6 +351,14 @@ export class MockGateway implements LlmGateway {
   readonly kind: GatewayKind = 'mock';
   readonly modelName = '未接入模型';
 
+  /**
+   * fallbackReason：这条轨迹是「真网关调用失败后」的降级，而不是「压根没配 Key」。
+   *
+   * 两者长得一样但话不能一样说 —— 有 Key 却报「服务端没有配置可用 Key」是假的，
+   * 用户会照着这句话去设置页白找一遍。
+   */
+  constructor(private readonly fallbackReason?: string) {}
+
   async *generate(ctx: GatewayContext): AsyncIterable<AgentEvent> {
     const intent = detectIntent(ctx.content);
     const template = TEMPLATES[intent] ?? TEMPLATES.general;
@@ -359,7 +367,13 @@ export class MockGateway implements LlmGateway {
     const assets = mountedAssetsOf(ctx.workspaceId);
     const hasLogAsset = assets.some((asset) => asset.type === 'log');
 
-    yield { type: 'routing', intent, mountedAssets: assets.map((asset) => asset.id), model: '未接入模型', degraded: true };
+    yield {
+      type: 'routing',
+      intent,
+      mountedAssets: assets.map((asset) => asset.id),
+      model: this.fallbackReason ? '降级轨迹（模型调用失败）' : '未接入模型',
+      degraded: true,
+    };
     /* 步骤标题里若提到挂载某类资产，clean 态必须改成"尚未挂载"——
      * 否则计划卡第一行就在暗示"已经接好了一个生产库"。 */
     const steps = assets.length === 0
@@ -448,13 +462,38 @@ export class MockGateway implements LlmGateway {
       };
     }
 
-    yield { type: 'notice', level: 'warn', title: '演示轨迹 · 未接入模型', content: DEGRADED_NOTICE };
+    yield {
+      type: 'notice',
+      level: 'warn',
+      title: this.fallbackReason ? '演示轨迹 · 模型调用失败后的降级' : '演示轨迹 · 未接入模型',
+      content: this.fallbackReason
+        ? [
+          `本次大模型调用失败（原因见上方通知），因此没有结论、没有置信度、没有产物。`,
+          '下面是真实执行的只读工具结果与真实引用片段 —— 它们来自本地索引，可以直接核对。',
+          '修好模型配置后重发这一句即可拿到真正的分析结论。',
+        ].join('\n')
+        : DEGRADED_NOTICE,
+    };
     yield { type: 'done', intent };
   }
 }
 
 /** OpenAI 兼容网关（B16 真实现）：SSE 流式 + 多轮上下文 + tool-calling 循环。
  *  失败自动退回规则化轨迹（同样不伪造结论）。 */
+/**
+ * 供应商 4xx/5xx 的正文往往直接写着原因（模型不存在 / Key 无效 / 余额不足 / 参数非法），
+ * 只抛 `llm http 400` 会让用户对着一个状态码干瞪眼。把正文一起带出来。
+ */
+async function providerError(prefix: string, status: number, response: Response): Promise<Error> {
+  let detail = '';
+  try {
+    detail = (await response.text()).slice(0, 400).replace(/\s+/g, ' ').trim();
+  } catch {
+    /* 读不到正文时只报状态码，不掩盖原始错误 */
+  }
+  return new Error(detail ? `${prefix} http ${status}：${detail}` : `${prefix} http ${status}`);
+}
+
 export class OpenAiCompatibleGateway implements LlmGateway {
   readonly kind: GatewayKind = 'openai-compatible';
 
@@ -568,7 +607,7 @@ export class OpenAiCompatibleGateway implements LlmGateway {
       }),
       signal: AbortSignal.timeout(60000),
     });
-    if (!response.ok) throw new Error(`llm summarize http ${response.status}`);
+    if (!response.ok) throw await providerError('llm summarize', response.status, response);
     const data = (await response.json()) as { choices?: { message?: { content?: string } }[] };
     const text = String(data.choices?.[0]?.message?.content ?? '').trim();
     if (!text) throw new Error('llm summarize 空回复');
@@ -587,24 +626,45 @@ export class OpenAiCompatibleGateway implements LlmGateway {
       ];
       const citations: CitationSeed[] = [];
       let providerUsage: { promptTokens: number; completionTokens: number } | null = null;
+      /* 思考模式会先吃掉一大截输出预算：max_tokens 太小时 content 还没开始写就被
+       * finish_reason=length 截断，表现为「模型回了但一个字都没有」。撞上就放大重试。 */
+      let maxTokens = this.maxTokens;
+      let escalated = 0;
+      let lastFinish = '';
+      /* 工具轮上限：4 轮时，稍复杂一点的代码问题会「一直查资料、没来得及写结论」，
+       * 最后一轮照样 finish=tool_calls，正文永远空 —— 用户看到的就是「llm 空回复」。 */
+      const MAX_ROUNDS = 8;
+      let toolsEnabled = true;
+      let nudged = false;
 
-      for (let round = 0; round < 4; round += 1) {
+      for (let round = 0; round < MAX_ROUNDS; round += 1) {
+        const lastRound = round === MAX_ROUNDS - 1;
+        if (lastRound && !nudged) {
+          /* 最后一轮剥夺工具并明说要结论：否则模型会继续调用工具，把轮次耗干。 */
+          toolsEnabled = false;
+          nudged = true;
+          messages.push({
+            role: 'user',
+            content: '（系统）工具调用轮次已用完：本轮不要再调用任何工具，直接用中文写出最终结论。',
+          });
+        }
         const response = await fetch(`${this.baseUrl.replace(/\/$/, '')}/chat/completions`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` },
           body: JSON.stringify({
             model: this.model,
             messages,
-            tools: this.toolsSpec(ctx),
+            ...(toolsEnabled ? { tools: this.toolsSpec(ctx) } : {}),
             stream: true,
-            ...(this.maxTokens > 0 ? { max_tokens: this.maxTokens } : {}),
+            ...(maxTokens > 0 ? { max_tokens: maxTokens } : {}),
             /* 让供应商在最后一帧带上真实 usage；不支持的实现会忽略该字段，
              * 那样就落到 estimate 分支并在 notice 里说明「用量为估算」。 */
             stream_options: { include_usage: true },
           }),
           signal: AbortSignal.timeout(120000),
         });
-        if (!response.ok || !response.body) throw new Error(`llm http ${response.status}`);
+        if (!response.ok) throw await providerError('llm', response.status, response);
+        if (!response.body) throw new Error('llm 响应无正文流');
 
         /* 解析 SSE：增量文本直接以 text_delta 转发；tool_calls 增量按 index 聚合。 */
         const reader = response.body.getReader();
@@ -612,6 +672,8 @@ export class OpenAiCompatibleGateway implements LlmGateway {
         let buffer = '';
         let finish = '';
         let roundText = '';
+        /* 思考模式的思维链：必须原样回传给下一轮，否则 DeepSeek 直接 400。 */
+        let roundReasoning = '';
         const toolCalls: { index: number; name: string; args: string }[] = [];
         for (;;) {
           const { done, value } = await reader.read();
@@ -625,7 +687,7 @@ export class OpenAiCompatibleGateway implements LlmGateway {
             const data = trimmed.slice(5).trim();
             if (data === '[DONE]') continue;
             let chunk: {
-              choices?: { delta?: { content?: string; tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[] }; finish_reason?: string | null }[];
+              choices?: { delta?: { content?: string; reasoning_content?: string; tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[] }; finish_reason?: string | null }[];
               usage?: { prompt_tokens?: number; completion_tokens?: number };
             };
             try { chunk = JSON.parse(data); } catch { continue; }
@@ -637,6 +699,9 @@ export class OpenAiCompatibleGateway implements LlmGateway {
             }
             const choice = chunk.choices?.[0];
             const delta = choice?.delta;
+            if (delta?.reasoning_content) {
+              roundReasoning += delta.reasoning_content;
+            }
             if (delta?.content) {
               roundText += delta.content;
               text += delta.content;
@@ -658,10 +723,37 @@ export class OpenAiCompatibleGateway implements LlmGateway {
           }
         }
 
+        /* 每轮把真实回包形状落一行日志：再出「空回复」时能直接看出是截断、
+         * 空 delta 还是工具轮 —— 不用再猜。 */
+        lastFinish = finish;
+        console.log(
+          `[llm] round=${round} finish=${finish || '(none)'} text=${roundText.length}`
+          + ` reasoning=${roundReasoning.length} tools=${toolCalls.length} maxTokens=${maxTokens}`,
+        );
+
+        if (finish === 'length' && !roundText.trim() && toolCalls.length === 0 && escalated < 3) {
+          const before = maxTokens;
+          maxTokens = Math.min(65536, Math.max(16384, maxTokens * 2));
+          escalated += 1;
+          yield {
+            type: 'notice',
+            level: 'info',
+            title: '思考模式占满输出上限，已放大 max_tokens 重试',
+            content: `本轮被 finish_reason=length 截断（${before} tokens 全被思考吃掉，正文还没开始）。已自动提高到 ${maxTokens} 重试。`,
+          };
+          /* 不消耗轮次预算：这一轮等于没产出。 */
+          round -= 1;
+          continue;
+        }
+
         if (finish === 'tool_calls' && toolCalls.length > 0) {
           messages.push({
             role: 'assistant',
             content: roundText || null,
+            /* DeepSeek 思考模式的硬性要求：带 tool_calls 的 assistant 消息必须把
+             * 本轮 reasoning_content 一起回传，否则下一轮 400
+             * 「The `reasoning_content` in the thinking mode must be passed back to the API」。 */
+            ...(roundReasoning ? { reasoning_content: roundReasoning } : {}),
             tool_calls: toolCalls.map((tc) => ({
               id: `call_${tc.index}`, type: 'function',
               function: { name: tc.name, arguments: tc.args || '{}' },
@@ -694,7 +786,12 @@ export class OpenAiCompatibleGateway implements LlmGateway {
         break;
       }
 
-      if (!text.trim()) throw new Error('llm 空回复');
+      if (!text.trim()) {
+        throw new Error(
+          `llm 空回复：模型跑完了 ${MAX_ROUNDS} 轮，正文依旧为空（最后一次 finish=${lastFinish || '(none)'}，maxTokens=${maxTokens}）。`
+          + '若 finish=length，说明思考模式把输出预算吃光了；若 finish=(none)，说明供应商回的是空流。',
+        );
+      }
 
       /* 引用事件：来自真实 kb_search/code_search 命中，与结论 [n] 角标顺序对应。 */
       const cited = citations.slice(0, 4);
@@ -739,9 +836,9 @@ export class OpenAiCompatibleGateway implements LlmGateway {
         type: 'notice',
         level: 'warn',
         title: '模型调用失败，已降级为演示轨迹',
-        content: `原因：${reason.slice(0, 200)}\n降级后不会产出结论，只给出真实工具执行结果。`,
+        content: `原因：${reason.slice(0, 200)}\n本次调用：${this.baseUrl.replace(/\/$/, '')}/chat/completions · model=${this.model}\n降级后不会产出结论，只给出真实工具执行结果。`,
       };
-      const fallback = new MockGateway();
+      const fallback = new MockGateway(reason);
       for await (const event of fallback.generate(ctx)) yield event;
     }
   }
@@ -804,7 +901,10 @@ export interface LlmPreset {
 export const LLM_PRESETS: LlmPreset[] = [
   {
     id: 'deepseek', label: 'DeepSeek（深度求索）',
-    baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-reasoner'],
+    /* 2026-11 起 DeepSeek 只认 deepseek-flash / deepseek-v4-pro，deepseek-chat 与
+     * deepseek-reasoner 已下线：拿旧名字调 /chat/completions 会被判 400 Model Not Exist。
+     * 这里的列表只是离线兜底，点「拉取模型列表」以端点实拉为准。 */
+    baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-flash', 'deepseek-v4-pro'],
     keyUrl: 'https://platform.deepseek.com/api_keys',
   },
   {

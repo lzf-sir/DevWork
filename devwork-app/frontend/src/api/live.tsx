@@ -241,14 +241,23 @@ async function loadSnapshot(conversationId: string, conversationWorkspaceId: str
   const serverId = pickAsset('server');
   const dbId = pickAsset('db');
   const codeId = pickAsset('code');
-  /* 没有对应资产时用空串：safe() 会把 404 / 空 id 转成 null，切片保持空态。 */
-  const serverKey = serverId || '—';
-  const dbKey = dbId || '—';
-  const codeKey = codeId || '—';
+
+  /**
+   * 有 id 才发请求。
+   *
+   * 旧版用 '—' 当占位 id 照常发请求，服务端只能回一串 404 ——
+   * 控制台被 404 噪音糊满，真故障反而看不见。没有对应资产就是空态，
+   * 不该拿一个假 id 去撞后端。
+   */
+  const byAsset = <T,>(id: string, call: (id: string) => Promise<T>): Promise<T | null> =>
+    id ? call(id) : Promise.resolve(null);
+  /** 会话同理：空 id 拼出来的 /conversations//context 也是 404 制造机。 */
+  const byConversation = <T,>(call: (id: string) => Promise<T>): Promise<T | null> =>
+    conversationId ? call(conversationId) : Promise.resolve(null);
 
   /* 文件树要先拿：文件内容的请求路径来自真实文件树，
    * 不能用演示清单里的路径（那是开发期的假仓库文件名）。 */
-  const fileTree = await safe(api.getFileTree(codeKey));
+  const fileTree = codeId ? await safe(api.getFileTree(codeId)) : null;
   const treeRows = rows<Dict>(fileTree);
   const realFilePaths = treeRows
     .filter((n) => n.isFile === true)
@@ -269,27 +278,27 @@ async function loadSnapshot(conversationId: string, conversationWorkspaceId: str
     safe(api.getSettings()),
     safe(api.getCommandWhitelist()),
     safe(api.getCommandBlacklist()),
-    safe(api.getContextPanel(conversationId)),
-    safe(api.getExecutionPanel(conversationId)),
-    safe(api.getArtifactPanel(conversationId)),
-    safe(api.getAsset(serverKey)),
-    safe(api.getAssetActivities(serverKey)),
-    safe(api.listCapabilities(serverKey)),
-    safe(api.getAsset(dbKey)),
-    safe(api.getAssetActivities(dbKey)),
-    safe(api.listCapabilities(dbKey)),
-    safe(api.getAsset(codeKey)),
-    safe(api.getAssetActivities(codeKey)),
-    safe(api.listCapabilities(codeKey)),
-    safe(api.getCommandHistory(serverKey, 'sess-1')),
-    safe(api.getSqlSchema(dbKey)),
-    safe(api.getTableRows(dbKey, 'order', { page: 1, pageSize: 8 })),
-    safe(api.getTableStructure(dbKey, 'order')),
-    safe(api.runSqlQuery(dbKey, SNAPSHOT_SQL, { maxRows: 1000 })),
-    Promise.all(
-      realFilePaths.map((p) => safe(api.getFileContent(codeKey, p))),
-    ),
-    safe(api.listCitations(conversationId)),
+    byConversation((id) => safe(api.getContextPanel(id))),
+    byConversation((id) => safe(api.getExecutionPanel(id))),
+    byConversation((id) => safe(api.getArtifactPanel(id))),
+    byAsset(serverId, (id) => safe(api.getAsset(id))),
+    byAsset(serverId, (id) => safe(api.getAssetActivities(id))),
+    byAsset(serverId, (id) => safe(api.listCapabilities(id))),
+    byAsset(dbId, (id) => safe(api.getAsset(id))),
+    byAsset(dbId, (id) => safe(api.getAssetActivities(id))),
+    byAsset(dbId, (id) => safe(api.listCapabilities(id))),
+    byAsset(codeId, (id) => safe(api.getAsset(id))),
+    byAsset(codeId, (id) => safe(api.getAssetActivities(id))),
+    byAsset(codeId, (id) => safe(api.listCapabilities(id))),
+    byAsset(serverId, (id) => safe(api.getCommandHistory(id, 'sess-1'))),
+    byAsset(dbId, (id) => safe(api.getSqlSchema(id))),
+    byAsset(dbId, (id) => safe(api.getTableRows(id, 'order', { page: 1, pageSize: 8 }))),
+    byAsset(dbId, (id) => safe(api.getTableStructure(id, 'order'))),
+    byAsset(dbId, (id) => safe(api.runSqlQuery(id, SNAPSHOT_SQL, { maxRows: 1000 }))),
+    codeId
+      ? Promise.all(realFilePaths.map((p) => safe(api.getFileContent(codeId, p))))
+      : Promise.resolve([]),
+    byConversation((id) => safe(api.listCitations(id))),
   ]);
 
   /* ---- 审计（来自 REST，不再用静态常量） ---- */

@@ -68,7 +68,7 @@ let requestCounter = 0;
  * Key 在离线下一律「未配置」：离线环境没有钥匙串，如实说没有。
  */
 const MOCK_LLM_PRESETS = [
-  { id: 'deepseek', label: 'DeepSeek（深度求索）', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-reasoner'], keyUrl: 'https://platform.deepseek.com/api_keys' },
+  { id: 'deepseek', label: 'DeepSeek（深度求索）', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-flash', 'deepseek-v4-pro'], keyUrl: 'https://platform.deepseek.com/api_keys' },
   { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1'], keyUrl: 'https://platform.openai.com/api-keys' },
   { id: 'ollama', label: '本地 Ollama（无需 Key）', baseUrl: 'http://localhost:11434/v1', models: ['qwen2.5:7b', 'llama3.1:8b'], keyUrl: 'https://ollama.com/library', local: true },
   { id: 'litellm', label: 'LiteLLM 网关（自部署 · 一个 Key 走所有上游）', baseUrl: 'http://localhost:4000/v1', models: [], keyUrl: 'https://docs.litellm.ai/docs/proxy/quick_start' },
@@ -85,7 +85,7 @@ interface MockLlmProfile {
 }
 
 let mockLlmProfiles: MockLlmProfile[] = [
-  { id: 'mock-1', label: 'DeepSeek Chat', provider: 'deepseek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', local: false },
+  { id: 'mock-1', label: 'DeepSeek Flash', provider: 'deepseek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-flash', local: false },
 ];
 let mockLlmActiveId = 'mock-1';
 

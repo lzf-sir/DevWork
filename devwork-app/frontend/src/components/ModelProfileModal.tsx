@@ -125,6 +125,12 @@ export function ModelProfileModal({
       setError('模型名不能为空');
       return;
     }
+    /* 端点实拉过列表时，手填的名字必须真在里面：否则第一次调用就是 400，
+     * 而用户看到的只有「模型调用失败」，很难联想到是模型名写错。 */
+    if (modelSource === 'live' && modelOptions.length > 0 && !modelOptions.includes(model.trim())) {
+      setError(`该端点没有模型「${model.trim()}」，可选：${modelOptions.slice(0, 8).join(' / ')}`);
+      return;
+    }
     onSubmit({ label: label.trim(), provider, baseUrl: url, model: model.trim(), apiKey: apiKey.trim() });
   };
 

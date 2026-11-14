@@ -285,6 +285,19 @@ export function request<T>(
   /* 资产级请求在这里统一补 workspaceId（唯一注入点）。 */
   const target = withWorkspaceScope(path);
 
+  /* 资产作用域但没带 id 的路径（`/assets//repo`）：只会换来 404。
+   * 打包态首屏没有选中资产，视图层仍可能挂载并发起请求 —— 在唯一出口短路，
+   * 返回一句可读的错误，而不是把一串 404 打给用户看。 */
+  if (/^\/assets\/(?:[/?]|$)/.test(target)) {
+    lastRequestFallback = true;
+    return Promise.resolve({
+      ok: false,
+      data: null as unknown as T,
+      error: { code: 'E_NO_TARGET', message: '未选择资产，已跳过请求' },
+      meta: { requestId: requestId(), ts: Date.now(), apiMode },
+    });
+  }
+
   return fetch(BASE + target, {
     method,
     headers: {

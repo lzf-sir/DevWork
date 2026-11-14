@@ -56,13 +56,22 @@ const GLYPH_KIND: Record<string, string> = {
   '▧': 'kb',
 };
 
+/** 空态侧栏数据：一个工作区都没有时（打包态首次启动）用它顶住首屏。
+ *  以前这里直接解引用 project.sidebar，空列表会在渲染期抛错 —— React 卸载整棵树 = 白屏。 */
+const EMPTY_SIDEBAR: SidebarData = {
+  assetFolders: [],
+  looseAssets: [],
+  convFolders: [],
+  looseConvs: [],
+};
+
 /** 左栏：208px，资产中心 / 会话两个分区 + 底部固定入口。
  *  收起 / 展开入口统一在窗口左上角（顶栏 .menu-toggle），本组件内不再放折叠按钮。 */
 export default function Sidebar(): React.ReactElement {
   const { state, navigate, setConversation, addToast, reloadSidebar, setModal, newConversation, renameConversation, removeConversation, archiveConversation, setActiveAsset, toggleCollab } =
     useStore();
   const project = state.projects.find((p) => p.id === state.workspaceId) ?? state.projects[0];
-  const data = project.sidebar;
+  const data = project?.sidebar ?? EMPTY_SIDEBAR;
   const [folders, setFolders] = useState<Record<string, boolean>>(() => initialFolderState(data));
   const [wizardOpen, setWizardOpen] = useState<boolean>(false);
   /* 待人状态：读全局快照，不再本组件轮询。
@@ -106,8 +115,8 @@ export default function Sidebar(): React.ReactElement {
   );
 
   useEffect(() => {
-    setFolders(initialFolderState(project.sidebar));
-  }, [state.workspaceId, project.sidebar]);
+    setFolders(initialFolderState(data));
+  }, [state.workspaceId, data]);
 
   /* 菜单靠 mousedown 关闭：打开菜单的那次 click 之前 mousedown 已经过去，
    * 不会出现「刚点开就被同一次点击关掉」的经典竞态。 */

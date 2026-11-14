@@ -11,7 +11,7 @@ import cors from 'cors';
 import { CORS_ORIGINS, DIST_DIR, HOST, PORT, distExists, ensureDirs } from './config';
 import { initDatabase, closeDatabase, ensureColumn, normalizeAuditActors, run, dropLegacyAccountTables } from './db/database';
 import { initDemoDatabase } from './db/demo';
-import { seedIfEmpty, migrateLegacySettings, ensureAgentV9Assets } from './db/seed';
+import { seedIfEmpty, migrateLegacySettings, ensureAgentV9Assets, backfillAssetCapabilities } from './db/seed';
 import { migrateAboutVersion, migrateCitations, migratePermScopeMemory, migrateSourceReadPosition } from './db/migrate';
 import { bootstrapArtifacts, bootstrapRepo } from './sandbox/bootstrap';
 import { ensureFtsTable, runDocIndex, runIndex } from './services/indexer';
@@ -101,6 +101,8 @@ ensureColumn('browser_state', 'page_title', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('browser_state', 'page_text', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('browser_state', 'page_captured_at', "TEXT NOT NULL DEFAULT ''");
 migrateLegacySettings();
+/* 能力行幂等补齐：老库/自建资产缺 read/query/write 三档，能力授权页会空白。 */
+backfillAssetCapabilities();
 normalizeAuditActors();
 ensureFtsTable();
 

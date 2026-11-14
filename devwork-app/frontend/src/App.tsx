@@ -34,6 +34,10 @@ function useGlobalShortcuts(): void {
 
   useEffect(() => {
     const handler = (event: KeyboardEvent): void => {
+      /* 少数 KeyboardEvent（合成事件、个别输入法/无障碍工具派发的）不带 key，
+       * 直接 toLowerCase() 会抛 TypeError，而它在 window 上，一抛就等于把
+       * 全局快捷键整条链路打瘫。没有 key 就不是我们要处理的按键，安静退出。 */
+      if (typeof event.key !== 'string') return;
       const api = storeRef.current;
       const s = api.state;
       const mod = event.metaKey || event.ctrlKey;

@@ -526,3 +526,37 @@ export function migrateLegacySettings(): void {
   // eslint-disable-next-line no-console
   console.log('[DevWork] perm 设置已迁移：orgForceReadOnly=false（只读开关可单独关闭）');
 }
+
+/**
+ * 幂等补齐能力行：早期版本创建资产时不写 asset_capability，
+ * 导致用户自建资产的「能力授权」页空白、权限裁决退回全局规则。
+ * 启动时给缺行的资产补上 read / query / write 三档（写档要求人工确认）。
+ */
+export function backfillAssetCapabilities(): void {
+  const assets = all<{ id: string }>('SELECT id FROM asset');
+  const caps = [
+    ['read', 'auto', '只读能力（自动放行）'],
+    ['query', 'auto', '数据查询能力（自动放行）'],
+    ['write', 'ask', 'Agent 写操作需人工确认'],
+  ] as const;
+  let filled = 0;
+  for (const asset of assets) {
+    const existing = all<{ n: number }>(
+      'SELECT COUNT(*) AS n FROM asset_capability WHERE asset_id = ?',
+      asset.id,
+    )[0]?.n ?? 0;
+    if (existing > 0) continue;
+    caps.forEach(([cap, approval, description], index) => {
+      run(
+        `INSERT INTO asset_capability (id,asset_id,capability,granted,approval,locked,description)
+         VALUES (?,?,?,?,?,?,?)`,
+        `cap-${asset.id}-${index}`, asset.id, cap, 1, approval, index === 0 ? 1 : 0, description,
+      );
+    });
+    filled += 1;
+  }
+  if (filled > 0) {
+    // eslint-disable-next-line no-console
+    console.log(`[DevWork] 已为 ${filled} 个资产补齐能力行（read/query/write）`);
+  }
+}

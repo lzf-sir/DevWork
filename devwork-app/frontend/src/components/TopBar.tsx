@@ -8,6 +8,8 @@ import { ArrowIcon, CodeIcon, PanelIcon, SearchIcon } from './icons';
 export default function TopBar(): React.ReactElement {
   const { state, navigate, toggleLeft, setPalette } = useStore();
   const project = state.projects.find((p) => p.id === state.workspaceId) ?? state.projects[0];
+  /* 一个工作区都没有时（打包态首次启动）没有名字可显示，如实写「未选择项目」而不是让渲染炸掉。 */
+  const wsName = project?.name ?? '未选择项目';
 
   /** Windows 窗口控制按钮；Web 模式下 window.desktop 不存在，点击保持无副作用。 */
   const desktopClose = (): void => { void window.desktop?.close(); };
@@ -44,7 +46,7 @@ export default function TopBar(): React.ReactElement {
       </button>
       <div className="wsdrop no-drag" title="切换项目" onClick={() => navigate('projects')}>
         <i />
-        <span id="wsname">{project.name}</span>
+        <span id="wsname">{wsName}</span>
         <span className="chev" />
       </div>
       <div className="grow" />

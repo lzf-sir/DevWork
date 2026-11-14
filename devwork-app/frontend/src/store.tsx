@@ -458,7 +458,9 @@ const INITIAL_STATE: AppState = {
   rightCollapsed: true,
   workspaceId: 'w-ops',
   activeConversationId: __PACKAGED__ ? '' : 'c-gmv',
-  activeAssetId: 'a-order-service',
+  /* 打包态不能预置演示资产 id：resolveAssetTarget 的 preferredId 会优先命中它，
+   * 于是详情页拿着别的环境里才存在的 a-order-service 去撞后端，满屏 404。 */
+  activeAssetId: __PACKAGED__ ? '' : 'a-order-service',
   activeConversationTitle: __PACKAGED__ ? '' : 'GMV 归因',
   extraConversations: [],
   assetChat: null,
@@ -487,7 +489,9 @@ const INITIAL_STATE: AppState = {
   citation: null,
   approvalSeq: 0,
   hotkey: null,
-  projects: MOCK_SNAPSHOT.PROJECTS,
+  /* 打包态侧栏同样从空开始：演示项目里的 a-order-service / a-kb 在后端根本不存在，
+   * 启动瞬间的详情视图会拿着它们轰出一串 404。真实项目由 bootstrap 灌入。 */
+  projects: __PACKAGED__ ? [] : MOCK_SNAPSHOT.PROJECTS,
   termPreset: '',
   pendingSource: null,
   sqlPreset: null,

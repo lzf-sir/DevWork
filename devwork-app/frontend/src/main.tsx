@@ -1,5 +1,6 @@
 import ReactDOM from 'react-dom/client';
 import App from './App';
+import AppErrorBoundary from './components/AppErrorBoundary';
 import { StoreProvider } from './store';
 import { LiveDataProvider } from './api/live';
 import './styles.css';
@@ -14,9 +15,11 @@ if (!container) {
  * Store 与 LiveData 直接挂载，数据全部来自本机服务与本地库。
  */
 ReactDOM.createRoot(container).render(
-  <StoreProvider>
-    <LiveDataProvider>
-      <App />
-    </LiveDataProvider>
-  </StoreProvider>,
+  <AppErrorBoundary>
+    <StoreProvider>
+      <LiveDataProvider>
+        <App />
+      </LiveDataProvider>
+    </StoreProvider>
+  </AppErrorBoundary>,
 );

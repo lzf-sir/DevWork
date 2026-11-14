@@ -127,6 +127,24 @@ export function registerAssetRoutes(app: Express): void {
       id, workspaceId, optionalId(payload.folderId), type, name, String(payload.env ?? ''),
       'idle', 0, 0, String(payload.subtitle ?? ''), JSON.stringify(assetConfig), nowIso(),
     );
+    /* 能力三档：以前只有种子资产写能力行，用户自建资产的「能力授权」页永远是空的，
+     * 裁决也会退回全局规则 —— 建资产时一并补齐，页面上看得见、开关真生效。 */
+    const caps = [
+      ['read', 'auto', '只读能力（自动放行）'],
+      ['query', 'auto', '数据查询能力（自动放行）'],
+      ['write', 'ask', 'Agent 写操作需人工确认'],
+    ] as const;
+    caps.forEach(([capability, approval, description], index) => {
+      try {
+        run(
+          `INSERT INTO asset_capability (id,asset_id,capability,granted,approval,locked,description)
+           VALUES (?,?,?,?,?,?,?)`,
+          `cap-${id}-${index}`, id, capability, 1, approval, index === 0 ? 1 : 0, description,
+        );
+      } catch {
+        /* 能力行写不进去不能把资产创建一起拖垮：资产本身已经落库了。 */
+      }
+    });
     const who = await identity(req);
     /* 凭据：接入时一并录入 —— 用户不必创建完再去「能力授权」页补一次。
      * 秘密经 safeStorage 加密存本机，库里只留 secret_ref；鉴权方式与账号名存普通列。 */

@@ -42,7 +42,8 @@ export default function CommandPalette(): React.ReactElement {
   const items = useMemo<PaletteItem[]>(() => {
     const result: PaletteItem[] = [];
     const project = state.projects.find((p) => p.id === state.workspaceId) ?? state.projects[0];
-    const sidebar = project.sidebar;
+    /* 空工作区（打包态首次启动）没有侧栏数据：只保留本地会话与命令，别把命令面板一起打崩。 */
+    const sidebar = project?.sidebar ?? { assetFolders: [], looseAssets: [], convFolders: [], looseConvs: [] };
 
     sidebar.convFolders.forEach((folder) =>
       folder.items.forEach((item) =>
