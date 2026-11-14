@@ -602,3 +602,19 @@ env -i DEVWORK_DATA_DIR=/tmp/neg-data DEVWORK_SANDBOX_DIR=/tmp/neg-sb DEVWORK_PO
 **复核判据**（不看"zod 有没有进包"）：① 从**仓库外目录**启动并打到 `/api/bootstrap`（行为式，唯一真闸门）；② `preflight:release` 增两条静态断言（`shared/package.json.type === 'module'`、`shared/node_modules/zod` 存在），作用是报错时指明缺哪一环。只满足 ② 不判通过。
 
 > **我漏在哪**：A-P0-01 只做到「zod 不在暂存清单」+「仓库外 `require.resolve('zod')` 失败」，就把结论推到「补清单即完备」——**把"依赖清单齐了"当成了"解析链通了"**。漏的两步：没有顺着 `shared/contracts` 的**祖先链**反推 zod 该落在哪，也没有想到 `shared/` 会失去 ESM 上下文。这与本轮另外几处失误同构：**验证停在第一层就下结论**。
+
+---
+
+## 9. 1.0.1 待办与已知缺口（本轮明确不修，写在这里避免丢）
+
+| # | 项 | 为什么 1.0 不修 | 建议做法 |
+|---|---|---|---|
+| 1 | 审计筛选没有「全局 / 未知归属」两个显式桶 | `auditFilter()` 本来就不按 `workspace_id` 过滤，数据可见；加桶是新增筛选维度，不是修缺陷 | 加两个桶，并统计 `workspace_id=''` 行占比作为归属推导质量的观测指标 |
+| 2 | 浅色主题副文案 `.sd2` 对比度 2.61:1（低于 AA 4.5） | 共享样式全局偏浅，非本轮新增行；改它会影响整个设置页观感 | 统一提一档色阶，深色基线 5.32:1 保持不变 |
+| 3 | clean 态 `tool_row` / `approval_card` 的 `assetId` 仍是工具目录默认值（`a-order-db-prod` 等） | 属工具面派生与执行器绑定，改动面大，且不影响首启数据与结论 | 无资产时把 `assetId` 置空并在卡片显示「未绑定资产」，或从工具面派生时过滤 |
+| 4 | 一次性迁移标记之后产生的同类脏数据不会自愈 | 取舍：首启性能 vs 永久自愈（见 §3 T05） | 改为「按需重跑 + 版本号 @2」 |
+| 5 | 从 0.4.2 升级的库保留演示资产 | **已裁决**：升级不清用户数据，README 已知限制第 6 条声明 | 提供显式「清理示例数据」操作，不在升级路径静默删除 |
+| 6 | `GIT_ASKPASS` 备选凭据方案未实现 | 已用 `-c http.extraheader` 覆盖 http basic 并实测 clone+pull；老 git（<2.20）会诚实 401 | 支持 ssh 与老版本 git 时再补 |
+| 7 | `file-service` 的 `fileOutline` / `fileDiff` 仍是裸 `execFileSync('git')` | 不影响 P0-9；与「不弹窗、不挂死」口径不完全一致 | 统一走 `workspace-repos.git()` 的 `GIT_TERMINAL_PROMPT=0` 封装 |
+| 8 | `npm test` 与 `test:all` 口径分裂（前者不含写执行层） | 发布判据已改为「`test:all` + `test:gui` 两条命令」，`npm test` 保留为快速子集 | 给 `npm test` 改名（如 `test:fast`），避免被当发布判据 |
+
