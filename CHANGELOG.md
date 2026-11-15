@@ -5,6 +5,57 @@
 
 ---
 
+## 未发布 — 打包基础设施：依赖与二进制走国产镜像
+
+- **依赖源、二进制源统一走 npmmirror**：新增 `devwork-app/.npmrc`
+  （`registry` / `electron_mirror` / `electron_builder_binaries_mirror`）与
+  `devwork-app/scripts/lib/mirrors.mjs`（镜像地址的单一来源 + 向子进程注入
+  `ELECTRON_MIRROR` / `ELECTRON_BUILDER_BINARIES_MIRROR`）。国内网络下
+  `npm install` 与 `npm run dist` 不再卡在 `registry.npmjs.org` 和 GitHub releases：
+  electron 二进制（`electron-v<版本>-win32-x64.zip`）、electron-builder 的
+  nsis / winCodeSign / app-builder 全部从镜像取。
+  换源用 `DEVWORK_NPM_REGISTRY` / `DEVWORK_ELECTRON_MIRROR` /
+  `DEVWORK_ELECTRON_BUILDER_MIRROR`，回官方源用 `DEVWORK_MIRROR=off`。
+- **装依赖顺带提速**：脚本内 `npm ci / npm install` 显式带
+  `--registry <镜像> --no-audit --no-fund --prefer-offline`，省掉安全审计与赞助横幅的往返，
+  命中本地缓存时不回源。
+- **打包日志自证镜像**：`npm run dist` 首行与 electron-builder 之前各打一行当前镜像，
+  「到底走没走镜像 / 卡在哪个下载」不再靠猜。
+- **`pack:*` 与 `dist:*` 对齐**：原先只有 `pack` / `pack:dir`，敲 `npm run pack:all`
+  会报 `Missing script`。现在补齐 `pack:zip` / `pack:installer` / `pack:portable` /
+  `pack:all`，两套前缀等价，记住哪套都能用。
+- **端到端实测**：`npm run pack:all` 跑通，zip / nsis 安装包 / portable 三种产物齐出；
+  electron-builder 从镜像取二进制（nsis 1.3 MB 547 ms、nsis-resources 731 kB 1.08 s）。
+
+## 未发布 — 一键打包脚本完善（`scripts/package.mjs`）
+
+- **打包前环境门禁**：`package.mjs` 新增第 ⓪ 步 `checkEnvDeps`。先前它只在 `npm run dev`
+  路径上跑，直接打包时 Node 版本不够 / `node_modules` 缺失会以「tsc 或 vite 找不到」
+  的形式炸出来，和真的代码错误长得一样。现在缺依赖就自动 `npm ci`（走国产镜像），
+  Node < 22 一句话说清。**全新克隆的仓库双击 `scripts\package.bat` 也能一次跑通。**
+- **分步耗时**：每一步结束打一行耗时，收尾汇总「总耗时 + 分步耗时 + 产物目录」。
+  打包慢的时候第一个问题永远是「慢在哪一步」，此前只能回滚屏幕去数 builder 的日志。
+- **参数写错不再静默**：新增参数白名单。此前 `--alll` / `--zip2` 会被 `args.has()`
+  当成没写，静默退化成默认目标（只出 zip）—— 跑几分钟最后少两个产物，不看日志发现不了。
+  现在直接报「未知参数」并退出。
+- **`--help` / `-h`**：打印全部参数（目标 / 速度 / 其它 / 环境变量），排在环境门禁之前，
+  依赖没装也能立刻看到用法。
+- **`--no-open`，并收紧自动打开条件**：自动打开产物目录原先在 Windows 上恒为开，
+  `explorer` 会把窗口抢到前台，CI 与远程终端里纯属干扰。现在默认条件是
+  「Windows + 交互终端 + 非 `CI`」，`--open` 可强制、`--no-open` 可否决。
+- **标题跟着目标走**：`--all` 时标题从「zip 压缩包」改成「zip + 安装包 + 便携版」，
+  不再与实际产物不符。
+- **`scripts\package.bat` 同步修正**：注释里「生成安装包 / `release\DevWork Setup *.exe`」
+  早已过期（默认产物是 zip，实际路径是 `release\build`）；补 `--all` / `--help` 用法，
+  加 Node 缺失的前置检查（双击时给出国内镜像下载入口，而不是 `node is not recognized`），
+  结尾提示产物目录。`scripts/package.sh` 补齐各目标用法注释。
+- 已知噪音：npm 会对 `.npmrc` 里的 `electron_mirror` / `electron_builder_binaries_mirror`
+  打 `Unknown project config ...`；这两个键又被导出成 `npm_config_*` 传给子进程，子进程里的
+  `npm exec` 再打一句 `Unknown env config "electron-mirror"`。两句都是预期行为，
+  `@electron/get` 与 `app-builder-lib` 正是按这些变量取地址。
+
+---
+
 ## 1.0.0 — 2026-11-14
 
 首个对外正式版。定位：**只读为主 + 写操作逐次人工批准的可回滚受控写（实验性）**。

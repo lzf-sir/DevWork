@@ -3,6 +3,7 @@
  * 一键打包 DevWork —— 对齐 DeepSeek Harness 官方桌面端的发布链路。
  *
  * 链路（每一步都是真的，不是摆设）：
+ *   ⓪ 环境检查         Node 版本门禁；node_modules 缺失时自动 npm ci（走国产镜像）
  *   ① check:version    版本只有一个来源，semver 合法，渠道元数据不打架
  *   ② build            typecheck（前后端）+ vite build → dist/（注入 __PACKAGED__）
  *   ③ prepare:runtime  暂存 build/pkg：服务端源码 + 生产依赖 + 内置 Node 22
@@ -26,20 +27,48 @@
  *   node scripts/package.mjs --no-smoke    只跳过冒烟
  *   node scripts/package.mjs --force       运行时不走缓存，全量重建
  *   node scripts/package.mjs --open        完成后打开产物目录
+ *   node scripts/package.mjs --no-open     不打开产物目录（CI / 远程终端下本来就默认不打开）
+ *   node scripts/package.mjs --help        只打印全部参数，不打包
+ *
+ * 参数写错会直接报「未知参数」并退出，不会悄悄按默认目标（只出 zip）继续 ——
+ * 否则「敲了 --all 却只拿到 zip」这种失败方式不看日志根本发现不了。
+ *
+ * 每一步都会打印耗时，结束时再汇总一行，慢在哪一步不用回滚屏幕去数。
  *
  * 环境变量：
  *   DEVWORK_UPDATE_URL   覆盖更新源（默认取 electron-builder.yml 里的占位地址）
+ *   DEVWORK_MIRROR       =off 关闭国产镜像注入（默认走 npmmirror，见 scripts/lib/mirrors.mjs）
+ *   DEVWORK_NPM_REGISTRY / DEVWORK_ELECTRON_MIRROR / DEVWORK_ELECTRON_BUILDER_MIRROR
+ *                        替换某一段镜像地址（自建私服 / 换用其它镜像）
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { fail, log, npmBin, ok, removeDir, run, step, title, warn } from './lib/common.mjs';
+import { checkEnvDeps, fail, log, npmBin, ok, removeDir, run, step, title, warn } from './lib/common.mjs';
+import { applyMirrors, describeMirrors } from './lib/mirrors.mjs';
 import { RUNTIME_MODULES, SHARED_RUNTIME_MODULES, stageRuntime } from './lib/stage-runtime.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RELEASE = path.join(ROOT, 'release');
-const args = new Set(process.argv.slice(2));
+const rawArgs = process.argv.slice(2);
+const args = new Set(rawArgs);
+
+/**
+ * 已知参数白名单。
+ *
+ * 存在的意义是「拼错要报错」：以前 `--alll` / `--zip2` 会被 `args.has()` 全部当成
+ * 没写，于是静默退化成默认目标（只出 zip）。那种失败不看日志根本发现不了 ——
+ * 打包跑了几分钟，最后拿到的东西少了两个。
+ */
+const KNOWN_FLAGS = new Set([
+  '--dir', '--zip', '--installer', '--portable', '--all',
+  '--fast', '--no-typecheck', '--no-smoke', '--force',
+  '--open', '--no-open', '--help', '-h',
+]);
+/* `npm run pack:all -- --fast` 会原样透传，个别 npm 版本会把分隔符 `--` 也带进来。 */
+const unknownArgs = rawArgs.filter((arg) => arg !== '--' && !KNOWN_FLAGS.has(arg));
+
 const dirOnly = args.has('--dir');
 const onlyPortable = args.has('--portable');
 const onlyInstaller = args.has('--installer');
@@ -53,7 +82,14 @@ const fastMode = args.has('--fast');
 const skipTypecheck = args.has('--no-typecheck') || fastMode;
 const skipSmoke = args.has('--no-smoke') || fastMode;
 const forceRuntime = args.has('--force');
-const openAfter = args.has('--open') || process.platform === 'win32';
+/* 自动弹资源管理器只对「人在本机看着屏幕」有意义：
+ * CI、远程终端、被别的脚本调起时弹窗既无意义又会干扰（explorer 会把窗口抢焦点），
+ * 所以默认条件收紧成 win32 + 真 TTY + 非 CI。--open 可以强制，--no-open 可以否决。 */
+const openAfter = args.has('--open')
+  || (!args.has('--no-open')
+    && process.platform === 'win32'
+    && Boolean(process.stdout.isTTY)
+    && !process.env.CI);
 const version = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
 const script = (name) => path.join(ROOT, 'scripts', name);
 
@@ -61,11 +97,95 @@ const wantInstaller = !dirOnly && (onlyInstaller || allTargets);
 const wantPortable = !dirOnly && (onlyPortable || allTargets);
 const wantZip = !dirOnly && (zipOnly || allTargets);
 
-title('DevWork 打包（zip 压缩包）');
+/* 分步计时。打包慢的时候第一个问题永远是「慢在哪一步」，
+ * 而 electron-builder 的几十分钟会被中间几百行日志冲散，回头数不清。 */
+const timings = [];
+let lastMark = Date.now();
+const mark = (label) => {
+  const now = Date.now();
+  timings.push([label, now - lastMark]);
+  lastMark = now;
+};
+const humanMs = (ms) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`);
+
+function usage() {
+  log('');
+  log('DevWork 一键打包');
+  log('');
+  log('用法：node scripts/package.mjs [参数]');
+  log('');
+  log('产物目标（都不写就只出 zip）：');
+  log('  --dir          免安装目录 release/build/win-unpacked（自测最快，不做分发）');
+  log('  --zip          压缩包 DevWork-<版本>-win-x64.zip（默认）');
+  log('  --installer    NSIS 安装包 DevWork-Setup-<版本>-win-x64.exe');
+  log('  --portable     便携单文件 DevWork-<版本>-win-x64-portable.exe');
+  log('  --all          三种全出（= npm run pack:all = dist:all）');
+  log('');
+  log('速度与校验：');
+  log('  --fast           跳过 typecheck 与冒烟（只改 UI 时最快）');
+  log('  --no-typecheck   只跳 typecheck，仍跑冒烟');
+  log('  --no-smoke       只跳冒烟');
+  log('  --force          服务端运行时缓存作废，全量重建');
+  log('');
+  log('其它：');
+  log('  --open           完成后打开产物目录');
+  log('  --no-open        不自动打开（CI / 非交互终端下本来就是关的）');
+  log('  -h, --help       打印本用法');
+  log('');
+  log('环境变量：');
+  log('  DEVWORK_UPDATE_URL               覆盖自动更新源地址');
+  log('  DEVWORK_MIRROR=off               关闭国产镜像（需同时注释 .npmrc 里两条 *_mirror）');
+  log('  DEVWORK_NPM_REGISTRY             换 npm 源');
+  log('  DEVWORK_ELECTRON_MIRROR          换 Electron 二进制源');
+  log('  DEVWORK_ELECTRON_BUILDER_MIRROR  换 electron-builder 二进制源');
+  log('');
+}
+
+/* --help 要能在任何环境（包括依赖没装、Node 版本不够）下立刻返回：
+ * 所以它排在环境门禁之前，也不注入镜像、不读 package.json。 */
+if (args.has('--help') || args.has('-h')) {
+  usage();
+  process.exit(0);
+}
+if (unknownArgs.length > 0) {
+  fail(`未知参数：${unknownArgs.join(' ')}`);
+  log('  脚本不认识这个参数，直接继续会悄悄按默认目标（只出 zip）打包。');
+  log('  查看全部可用参数：node scripts/package.mjs --help');
+  process.exit(1);
+}
+
+const targetLabel = dirOnly
+  ? '免安装目录'
+  : [wantZip ? 'zip' : null, wantInstaller ? '安装包' : null, wantPortable ? '便携版' : null]
+    .filter(Boolean)
+    .join(' + ');
+
+title(`DevWork 打包（${targetLabel}）`);
+
+/* 镜像源在**最开头**就注入当前进程：后面每一步（npm run build / preflight / smoke /
+ * npm exec electron-builder）都是 spawn 出去的子进程，自动从 process.env 继承
+ * （lib/common.mjs 的 run() 是 `{...process.env, ...options.env}`），不必逐个传参。
+ * 「到底走没走镜像」是打包卡住时第一个要看的事实，所以第一行就把它印出来。 */
+const mirror = applyMirrors();
+step(describeMirrors());
+if (!mirror.enabled) {
+  warn('镜像已被 DEVWORK_MIRROR=off 关闭：electron / nsis 等会回官方源下载（境外网络才这么用）。');
+}
+
+/* ⓪ 环境门禁：Node 版本 + 依赖是否装好（缺就自动 npm ci，且走国产镜像）。
+ *
+ * 为什么放在最前面：全新克隆的仓库双击 `scripts\package.bat` 时没有 node_modules，
+ * 第二步的 `npm run build` 会报 tsc / vite 找不到 —— 那条报错和「代码真的写错了」
+ * 长得一模一样，能白查半小时。这一步把它变成一句「依赖未安装，正在执行 npm ci」。
+ * 它比 ① 版本门禁更靠前：连 npm 都跑不起来的时候，谈版本一致性没有意义。 */
+step('环境检查（Node 版本 / 依赖）…');
+checkEnvDeps(ROOT);
+mark('环境');
 
 /* ① 版本门禁 */
 step('版本一致性检查…');
 run(process.execPath, [script('check-version.mjs')], { cwd: ROOT });
+mark('版本');
 
 /* ② 构建：typecheck + vite build */
 step(skipTypecheck ? '前端构建（跳过 typecheck）…' : '类型检查与前端构建（npm run build）…');
@@ -76,11 +196,13 @@ run(npmBin(), ['run', skipTypecheck ? 'build:fast' : 'build'], {
   env: { DEVWORK_BUILD_PACKAGED: '1' },
 });
 ok('构建完成 → dist/');
+mark(skipTypecheck ? '构建（快）' : '构建');
 
 /* ③ 内置运行时 */
 step('暂存服务端运行时（源码 + 生产依赖 + 内置 Node）…');
 const { stageDir, cached } = stageRuntime(ROOT, { force: forceRuntime });
 ok(`运行时已暂存 → ${path.relative(ROOT, stageDir)}${cached ? '（缓存命中）' : ''}`);
+mark('运行时');
 
 /* ④ 发布静态门禁。
  *
@@ -96,19 +218,26 @@ ok(`运行时已暂存 → ${path.relative(ROOT, stageDir)}${cached ? '（缓存
  * 所以它不是冗余，别以"重复"为由删掉。 */
 step('发布静态门禁（版本单源 / 运行时依赖 / 契约导入）…');
 run(process.execPath, [script('preflight-release.mjs'), '--no-typecheck'], { cwd: ROOT });
+mark('发布门禁');
 
 /* ⑤ 冒烟：在打包前用包内运行时验一次真实启动页 */
 if (skipSmoke) {
   warn('已跳过冒烟（--fast / --no-smoke）：产物未做启动页验证，发布前请补跑 npm run smoke。');
+  mark('冒烟（跳过）');
 } else {
   step('打包产物冒烟（smoke）…');
   run(process.execPath, [script('smoke-package.mjs')], { cwd: ROOT });
+  mark('冒烟');
 }
 
 /* ⑥ electron-builder
  * 目标写法是 `--win <target>`（如 `--win nsis portable`），不是位置参数。
  * --publish never：只生成本地元数据，绝不往更新源上传。 */
 step('生成安装包与便携版（electron-builder）…');
+/* 首次打包时 builder 要下 nsis / winCodeSign / app-builder（合计几十 MB，全在 GitHub releases）。
+ * 「卡在 builder 十几分钟不动」几乎总是这些二进制在超时，所以把它走哪个源印出来。
+ * 这一步不读 --config：路径由 ELECTRON_BUILDER_BINARIES_MIRROR 决定（上面已注入）。 */
+log(`  二进制下载源：${mirror.builderBinariesMirror || '官方 GitHub（镜像已关闭）'}`);
 const outputDir = pickOutputDir();
 const targets = dirOnly
   ? ['dir']
@@ -129,6 +258,7 @@ if (process.env.DEVWORK_UPDATE_URL) {
   log(`  更新源：${process.env.DEVWORK_UPDATE_URL}`);
 }
 buildWithRetry(builderArgs);
+mark('electron-builder');
 
 /* ⑦ 产物自检 */
 title('产物');
@@ -263,14 +393,21 @@ if (fs.existsSync(unpackedModules)) {
   }
 }
 
+mark('产物自检');
+
 if (missing > 0) {
   log('');
   fail(`有 ${missing} 项未通过，请先看上面的输出。`);
+  log(`  本次耗时：${timings.map(([label, ms]) => `${label} ${humanMs(ms)}`).join(' · ')}`);
   process.exit(1);
 }
 
 log('');
-ok('打包完成。');
+ok(`打包完成 · 总耗时 ${humanMs(timings.reduce((sum, [, ms]) => sum + ms, 0))}`);
+/* 分步耗时一行铺开：想验证「改某个东西有没有变慢」的时候，
+ * 这一行比翻几十行 builder 日志有用得多。 */
+log(`  分步：${timings.map(([label, ms]) => `${label} ${humanMs(ms)}`).join(' · ')}`);
+log(`  产物目录：${path.relative(ROOT, outputRoot)}`);
 if (wantZip) {
   log('  压缩包：解压到任意目录，双击其中的 DevWork.exe 启动。');
   log('         数据落在 %APPDATA%\\DevWork（便携版在同级 DevWorkData\\；卸载/删除只需删程序目录）。');
@@ -309,7 +446,7 @@ function pickOutputDir() {
   if (!fs.existsSync(preferred)) return path.join(RELEASE, 'build');
   const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
   const fallback = path.join(RELEASE, `build-${stamp}`);
-  warn(`上一次的产物目录被占用（通常是杀软正在扫描），本次输出到 ${fallback}`);
+  warn(`上一次的产物目录删不掉（杀软/索引器占用，或权限不足），本次输出到 ${fallback}`);
   /* 删不干净的 `release/build` 是最坏的形态：exe 还在、resources 只剩空壳，
    * 桌面快捷方式指过去照样能启动，但主进程立刻报「未找到 tsx 运行时」——
    * 和真的缺文件一模一样，排查会被带偏。这里留一张显眼的说明，

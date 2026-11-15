@@ -115,9 +115,40 @@ npm run test:all       # 发布闸门：上面 + 写执行层 + 浏览器链路 
 npm run preflight:release  # 静态发布门禁（类型 / 版本单源 / 运行时依赖 / 契约导入）
 
 npm run build          # typecheck + vite build → dist/
-npm run dist           # 默认出 zip 压缩包（含运行时暂存 + 产物冒烟 + 自检）
-npm run dist:dir       # 只出免安装目录 release/build/win-unpacked（自测最快）
+npm run pack           # 默认出 zip 压缩包（含运行时暂存 + 产物冒烟 + 自检）
+npm run pack:dir       # 只出免安装目录 release/build/win-unpacked（自测最快）
+npm run pack:all       # zip + NSIS 安装包 + 便携版三种全出
+npm run pack -- --help # 全部参数（--fast / --no-smoke / --force / --no-open）
 ```
+
+依赖与二进制默认走**国产镜像（npmmirror）**，国内网络下 `npm install` / `npm run dist` 不用额外配置，
+也不会卡在 `registry.npmjs.org` 或 GitHub releases：
+
+- `devwork-app/.npmrc`：装包源 `registry` + electron 二进制 `electron_mirror` +
+  electron-builder 的 nsis / winCodeSign `electron_builder_binaries_mirror`（管 `npm install` 这条路径）；
+- `devwork-app/scripts/lib/mirrors.mjs`：同一份地址的单一来源，向打包脚本 spawn 出的子进程注入
+  `ELECTRON_MIRROR` / `ELECTRON_BUILDER_BINARIES_MIRROR`（管 electron-builder 自己下二进制）；
+- 换源：`DEVWORK_NPM_REGISTRY` / `DEVWORK_ELECTRON_MIRROR` / `DEVWORK_ELECTRON_BUILDER_MIRROR`；
+  境外网络想回官方源：`DEVWORK_MIRROR=off`，**同时**把 `.npmrc` 里两条 `*_mirror` 注释掉
+  （npm 仍会把 `.npmrc` 导出成 `npm_config_*` 交给子进程，只关脚本那层关不干净）；
+- npm 会对 `.npmrc` 里的 `electron_mirror` 打 `Unknown project config`，又会因为 npm 把这两个键
+  导出成 `npm_config_*` 交给子进程、子进程里的 `npm exec` 再打一句 `Unknown env config` ——
+  两句都是预期噪音，这两个键是 electron 生态的约定，@electron/get 与 app-builder-lib 照旧按
+  `npm_config_*` 取值（实测 nsis 从镜像下载 547ms、nsis-resources 1.08s）。
+- `pack:*` 与 `dist:*` 等价（`pack:all` = `dist:all` = zip + 安装包 + 便携版三种产物）。
+
+**一键打包（双击即可）**
+
+Windows 直接双击 `scripts\package.bat`（等价于 `npm run pack`，参数原样透传，如
+`scripts\package.bat --all`）。它是一层很薄的包装，真正干活的是 `scripts/package.mjs`：
+
+- 开头先做环境门禁：Node < 22 一句话说清，`node_modules` 缺失时自动 `npm ci` 并走国产镜像 ——
+  全新克隆的仓库双击也能一次跑通，不会糊一层「tsc 找不到」的假报错；
+- 每一步打印耗时，结束汇总总耗时 + 分步耗时 + 产物目录，慢在哪一步不用回滚屏幕去数；
+- 参数写错（`--alll`）直接报「未知参数」退出，不会悄悄退化成「只出 zip」；
+- `--help` 打印全部参数，不打包；
+- 自动打开产物目录只在「Windows + 交互终端 + 非 CI」时触发（`explorer` 抢焦点很烦），
+  `--open` 强制开、`--no-open` 强制不开。
 
 调试要点：
 

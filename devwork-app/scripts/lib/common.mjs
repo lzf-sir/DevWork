@@ -9,6 +9,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { applyMirrors, describeMirrors, npmRegistryArgs } from './mirrors.mjs';
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
 const paint = (code, text) => (COLOR ? `\u001b[${code}m${text}\u001b[0m` : text);
@@ -103,9 +104,27 @@ export function checkEnvDeps(root, { requireNode = 22, autoInstall = true } = {}
       fail('依赖未安装，请先执行 npm install');
       process.exit(1);
     }
-    step('依赖未安装，正在执行 npm install（首次会比较久）…');
     const hasLock = fs.existsSync(path.join(root, 'package-lock.json'));
-    run(npmBin(), [hasLock ? 'ci' : 'install'], { cwd: root });
+    /* 依赖源统一由 scripts/lib/mirrors.mjs 决定（默认 npmmirror）。
+     *
+     * 为什么要显式传 --registry，而不是只靠 .npmrc：
+     *   这个函数也会被 `npm run prepare:runtime` / `npm run dev` 调起，
+     *   而 .npmrc 可能被改、也可能有人用 `npm install --registry` 装过一次；
+     *   写在这里等于「只要走项目脚本，就一定是国内源」。
+     * --no-audit / --no-fund：装依赖不需要安全审计与赞助横幅（白等几十秒）。
+     * --prefer-offline：本机缓存命中时不回源，半离线/弱网也能装完。
+     * applyMirrors() 顺手把 ELECTRON_MIRROR 等注入本进程，
+     * 这样 npm 生命周期脚本里 electron 的 postinstall 也走镜像。 */
+    applyMirrors();
+    step(`依赖未安装，正在执行 ${hasLock ? 'npm ci' : 'npm install'}（首次会比较久）…`);
+    log(`  ${describeMirrors()}`);
+    run(npmBin(), [
+      hasLock ? 'ci' : 'install',
+      ...npmRegistryArgs(),
+      '--no-audit',
+      '--no-fund',
+      '--prefer-offline',
+    ], { cwd: root });
     ok('依赖安装完成');
   } else {
     ok('依赖已就绪');

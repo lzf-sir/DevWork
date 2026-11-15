@@ -11,6 +11,12 @@ asar: true
 # 关掉可省掉这段时间。
 npmRebuild: false
 
+# 下载源（electron 二进制 / nsis / winCodeSign / app-builder）**故意不写在这个文件里**：
+# 它们由 devwork-app/.npmrc（registry / electron_mirror / electron_builder_binaries_mirror，
+# 管 `npm install`）和 scripts/lib/mirrors.mjs（注入 ELECTRON_MIRROR /
+# ELECTRON_BUILDER_BINARIES_MIRROR，管 electron-builder 自己下二进制）共同负责，默认走 npmmirror。
+# 这里再硬编码一份 URL 只会让「换镜像要改两处」，两处早晚漂移。
+
 directories:
   output: release
   buildResources: desktop
