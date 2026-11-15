@@ -333,9 +333,76 @@ export function registerAssetRoutes(app: Express): void {
   app.patch('/api/assets/:id', wrap(async (req: Request, res: Response) => {
     const id = await requireAssetId(req);
     const patch = parseBody(assetPatchSchema, req);
-    if (typeof patch.name === 'string') run('UPDATE asset SET name = ? WHERE id = ?', patch.name, id);
+    const row = get<{ type: string; name: string; workspace_id: string; config: string | null; subtitle: string }>(
+      'SELECT type, name, workspace_id, config, subtitle FROM asset WHERE id = ?', id,
+    );
+    if (!row) throw new ApiFailure('E_NOT_FOUND', '资产不存在');
+    const type = String(row.type);
+    const name = typeof patch.name === 'string' ? patch.name.trim() : '';
+    if (name) run('UPDATE asset SET name = ? WHERE id = ?', name, id);
     if (typeof patch.env === 'string') run('UPDATE asset SET env = ? WHERE id = ?', patch.env, id);
-    ok(res, { id, ...patch });
+    if (typeof patch.subtitle === 'string') run('UPDATE asset SET subtitle = ? WHERE id = ?', patch.subtitle, id);
+    /* 配置项：和创建时**同一套服务端清洗**（类型白名单 + 敏感键拒绝 + 值有界）。
+     * 编辑走的是「增量合并」而不是整块覆盖：表单没渲染到的键（比如老数据里的 cloneUrl）
+     * 不该因为一次改名被悄悄抹掉。 */
+    const endpoint = typeof patch.endpoint === 'string' ? patch.endpoint.trim() : '';
+    const submitted = sanitizeAssetConfig(type, patch.config);
+    const touchesConfig = patch.config !== undefined || endpoint !== '';
+    if (touchesConfig) {
+      /* 老数据的 config 可能是坏 JSON：解析失败就当空对象，不能用一次编辑把整列清成 null。 */
+      let current: Record<string, unknown> = {};
+      if (typeof row.config === 'string' && row.config) {
+        try {
+          current = JSON.parse(row.config) as Record<string, unknown>;
+        } catch {
+          current = {};
+        }
+      }
+      const merged: Record<string, unknown> = { ...current, ...submitted };
+      if (endpoint) {
+        merged.endpoint = endpoint;
+        if (type === 'code') merged.cloneUrl = endpoint;
+      }
+      run('UPDATE asset SET config = ? WHERE id = ?', JSON.stringify(merged), id);
+    }
+    /* 凭据：只有真填了新秘密才重绑。留空 = 不动现有绑定，
+     * 否则「改个库名」会顺手把还在用的凭据清成未绑定。 */
+    const rawCredential = patch.credential;
+    let credentialBound: boolean | undefined;
+    let credentialError = '';
+    if (rawCredential && typeof rawCredential === 'object' && !Array.isArray(rawCredential)) {
+      const credential = rawCredential as Record<string, unknown>;
+      const label = String(credential.label ?? '').trim();
+      const secret = String(credential.secret ?? '');
+      if (secret.trim() !== '') {
+        try {
+          await bind(id, {
+            label: label || `${name || String(row.name)} 凭据`,
+            secret,
+            username: String(credential.username ?? ''),
+            authMethod: String(credential.method ?? ''),
+          }, await identity(req));
+          credentialBound = true;
+        } catch (error) {
+          credentialError = error instanceof ApiFailure ? error.message : '凭据绑定失败';
+        }
+      }
+    }
+    const who = await identity(req);
+    writeAudit({
+      workspaceId: String(row.workspace_id), actor: who.name, source: 'user',
+      action: 'asset.update', target: name || String(row.name), result: '成功', severity: 'info',
+      /* 审计只记改了什么**键**，不记值 —— 值里有主机名、库名这类不该进审计的细节。 */
+      detail: `编辑 ${type} 资产 ${name || String(row.name)}`
+        + (submitted && Object.keys(submitted).length > 0 ? ` · 配置项：${Object.keys(submitted).join('、')}` : '')
+        + (credentialBound === true ? ' · 凭据已重绑' : '')
+        + (credentialError ? ` · 凭据重绑失败：${credentialError}` : ''),
+    });
+    /* 返回更新后的详情形状而不是回显 patch：前端拿到的是库里真值，不是"我以为写进去了"。 */
+    ok(res, {
+      ...requireRow(await assetDetailShape(id), '资产'),
+      credentialError: credentialError || undefined,
+    });
   }));
   app.delete('/api/assets/:id', wrap(async (req: Request, res: Response) => {
     const id = await requireAssetId(req);

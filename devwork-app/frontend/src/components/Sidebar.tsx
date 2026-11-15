@@ -68,12 +68,11 @@ const EMPTY_SIDEBAR: SidebarData = {
 /** 左栏：208px，资产中心 / 会话两个分区 + 底部固定入口。
  *  收起 / 展开入口统一在窗口左上角（顶栏 .menu-toggle），本组件内不再放折叠按钮。 */
 export default function Sidebar(): React.ReactElement {
-  const { state, navigate, setConversation, addToast, reloadSidebar, setModal, newConversation, renameConversation, removeConversation, archiveConversation, setActiveAsset, toggleCollab } =
+  const { state, navigate, setConversation, addToast, reloadSidebar, setModal, newConversation, renameConversation, removeConversation, archiveConversation, setActiveAsset, toggleCollab, openAssetForm, closeAssetForm } =
     useStore();
   const project = state.projects.find((p) => p.id === state.workspaceId) ?? state.projects[0];
   const data = project?.sidebar ?? EMPTY_SIDEBAR;
   const [folders, setFolders] = useState<Record<string, boolean>>(() => initialFolderState(data));
-  const [wizardOpen, setWizardOpen] = useState<boolean>(false);
   /* 待人状态：读全局快照，不再本组件轮询。
    * 颜色与文案的计算搬去 utils/waiting —— 任务栏徽标和这里必须用同一套说法。 */
   const waiting = state.waiting;
@@ -327,6 +326,8 @@ export default function Sidebar(): React.ReactElement {
           title="资产操作"
           onClick={(event) =>
             openMenu(event, [
+              /* 编辑排最上面：它是最常按的那一项（改名、换库、改白名单都在这里）。 */
+              { label: '编辑资产…', run: () => openAssetForm(asset.id) },
               { label: '删除资产', danger: true, run: () => removeAsset(asset) },
             ])
           }
@@ -442,7 +443,7 @@ export default function Sidebar(): React.ReactElement {
               title="接入资产 / 新建文件夹"
               onClick={(event) =>
                 openMenu(event, [
-                  { label: '接入资产…', run: () => setWizardOpen(true) },
+                  { label: '接入资产…', run: () => openAssetForm() },
                   { label: '新建文件夹', run: () => createFolder('asset') },
                 ])
               }
@@ -523,7 +524,8 @@ export default function Sidebar(): React.ReactElement {
         </div>
       </div>
 
-      {wizardOpen ? <AssetConnect onClose={() => setWizardOpen(false)} /> : null}
+      {/* 接入 / 编辑资产共用一个弹窗：侧栏与详情页都从这里进（editId 为空 = 新建）。 */}
+      {state.assetForm ? <AssetConnect editId={state.assetForm.id} onClose={closeAssetForm} /> : null}
 
       {/* 左栏右边界拖拽手柄：180~260px（设计 §9.18）。 */}
       <Resizer edge="right" dragging={dragging} onBegin={beginDrag} onReset={resetWidth} />

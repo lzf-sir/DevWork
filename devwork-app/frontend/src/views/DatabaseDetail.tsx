@@ -45,7 +45,7 @@ type TableTabState = {
 };
 
 export default function DatabaseDetail(): React.ReactElement {
-  const { state, setModal, setSqlPreset, addToast, setConfigOpen, openAssetChat } = useStore();
+  const { state, setModal, setSqlPreset, addToast, setConfigOpen, openAssetChat, openAssetForm } = useStore();
   const refresh = useLiveRefresh();
   const {
     CAPS_DB,
@@ -333,24 +333,15 @@ export default function DatabaseDetail(): React.ReactElement {
     setSqlStatus('新查询 · 只读凭据生效 · 自动 LIMIT 1000');
   };
 
-  const renameAsset = (): void => {
-    setModal({
-      kind: 'prompt',
-      title: `重命名资产 · ${dbAsset?.name ?? '数据库'}`,
-      label: '新的资产名称：',
-      placeholder: dbAsset?.name ?? '新资产名',
-      confirmLabel: '保存',
-      onSubmit: (value: string) => {
-        if (!value.trim()) {
-          addToast('名称不能为空');
-          return;
-        }
-        void api.updateAsset(assetId, { name: value.trim() }).then((envelope) => {
-          addToast(envelope.ok ? '资产已重命名' : `重命名失败：${envelope.error?.message ?? '未知错误'}`);
-          refresh();
-        });
-      },
-    });
+  /* 编辑资产：把连接配置（引擎 / 主机 / 库名 / 白名单）与鉴权一次改完。
+   * 以前这里只有一个"重命名"，想改库名只能删了重建 —— 资产 id 一换，
+   * 索引、凭据、审计里的历史引用就全断了。 */
+  const editAsset = (): void => {
+    if (!assetId) {
+      addToast('还没有可编辑的数据库资产');
+      return;
+    }
+    openAssetForm(assetId);
   };
 
   const refreshSchema = (): void => {
@@ -490,7 +481,7 @@ export default function DatabaseDetail(): React.ReactElement {
             </div>
             {menuOpen ? (
               <div className="cmenu" onMouseLeave={() => setMenuOpen(false)}>
-                <div className="cmenu-item" onClick={() => { setMenuOpen(false); renameAsset(); }}>重命名资产</div>
+                <div className="cmenu-item" onClick={() => { setMenuOpen(false); editAsset(); }}>编辑资产…</div>
                 <div className="cmenu-item" onClick={() => { setMenuOpen(false); refreshSchema(); }}>刷新 Schema</div>
                 <div className="cmenu-item" onClick={() => { setMenuOpen(false); reindexAsset(); }}>重建索引</div>
               </div>

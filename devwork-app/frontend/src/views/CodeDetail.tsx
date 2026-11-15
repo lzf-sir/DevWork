@@ -18,7 +18,7 @@ type TreeNode = { label: string; depth: number; caret: string; path: string | nu
 
 /** 代码库详情：默认落在编辑器主功能区；能力授权 / 仓库信息收进右侧配置抽屉。 */
 export default function CodeDetail(): React.ReactElement {
-  const { state, setDetailTab, addToast, setModal, consumeSource, setConfigOpen, openAssetChat } = useStore();
+  const { state, setDetailTab, addToast, setModal, consumeSource, setConfigOpen, openAssetChat, openAssetForm } = useStore();
   /* B2：指标 / KV / 活动 / 能力 / 文件树 / diff / patch 全部由 REST 装配层提供。 */
   const {
     CAPS_CODE,
@@ -136,7 +136,7 @@ export default function CodeDetail(): React.ReactElement {
     });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assetId]);
+  }, [assetId, state.assetRevision]);
 
   /* 引用浮层「打开」→ 加载源文件并跳到真实行号。
    * 内容是从 /files/content 异步拉的，所以要等 DOM 渲染出对应行再滚；
@@ -405,24 +405,14 @@ export default function CodeDetail(): React.ReactElement {
       mono: true,
     });
   };
-  const renameAsset = (): void => {
-    setModal({
-      kind: 'prompt',
-      title: '重命名资产',
-      label: '新的资产名称：',
-      placeholder: 'order-service',
-      confirmLabel: '保存',
-      onSubmit: (value: string) => {
-        if (!value.trim()) {
-          addToast('名称不能为空');
-          return;
-        }
-        void api.updateAsset(assetId, { name: value.trim() }).then((envelope) => {
-          addToast(envelope.ok ? '资产已重命名' : `重命名失败：${envelope.error?.message ?? '未知错误'}`);
-          if (envelope.ok) setAssetName(value.trim());
-        });
-      },
-    });
+  /* 编辑资产：仓库地址 / 分支 / 索引模式 / 忽略规则 / 敏感文件规则与鉴权，
+   * 全在同一张表单里改。只给"重命名"的话，填错一个分支就只能删了重建。 */
+  const editAsset = (): void => {
+    if (!assetId) {
+      addToast('还没有可编辑的代码库资产');
+      return;
+    }
+    openAssetForm(assetId);
   };
 
   return (
@@ -494,7 +484,7 @@ export default function CodeDetail(): React.ReactElement {
                 <div className="cmenu-item" onClick={() => { setMenuOpen(false); showRepoInfo(); }}>仓库信息</div>
                 <div className="cmenu-item" onClick={() => { setMenuOpen(false); reindexAsset(); }}>重建索引</div>
                 <div className="cmenu-item" onClick={() => { setMenuOpen(false); showBranch(); }}>查看分支</div>
-                <div className="cmenu-item" onClick={() => { setMenuOpen(false); renameAsset(); }}>重命名资产</div>
+                <div className="cmenu-item" onClick={() => { setMenuOpen(false); editAsset(); }}>编辑资产…</div>
               </div>
             ) : null}
           </>

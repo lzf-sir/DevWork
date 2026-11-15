@@ -272,6 +272,21 @@ export interface AppState {
   detailTab: string;
   /** 资产配置抽屉（能力授权 / 凭据 / 资产信息）是否打开。 */
   configOpen: boolean;
+  /**
+   * 接入 / 编辑资产弹窗。
+   *
+   * null = 关着；{ id: null } = 新建；{ id } = 编辑这条资产。
+   * 放在全局而不是侧栏本地状态：详情页的「编辑资产」也得开同一个弹窗，
+   * 各挂一份就会变成两个能同时打开、各自维护表单的窗口。
+   */
+  assetForm: { id: string | null } | null;
+  /**
+   * 资产版本号：每次保存资产改动 +1。
+   *
+   * 详情页的加载 effect 依赖它 —— 编辑保存后抽屉关掉，页面上的名称/配置
+   * 必须跟着变，否则用户会以为没存上（这正是"存了但看着没存"的经典坑）。
+   */
+  assetRevision: number;
   settingsSection: string;
   orgSection: string;
   ctxTokens: number;
@@ -340,6 +355,11 @@ export interface StoreApi {
   setDetailTab: (tab: string) => void;
   /** 打开 / 关闭资产配置抽屉。 */
   setConfigOpen: (open: boolean) => void;
+  /** 打开接入 / 编辑资产弹窗：不传 id = 新建，传 id = 编辑该资产。 */
+  openAssetForm: (id?: string | null) => void;
+  closeAssetForm: () => void;
+  /** 资产保存成功后自增版本号，逼详情页重新拉一次真值。 */
+  bumpAssetRevision: () => void;
   setSettingsSection: (section: string) => void;
   setOrgSection: (section: string) => void;
   toggleReadOnly: () => void;
@@ -473,6 +493,8 @@ const INITIAL_STATE: AppState = {
   browserUrl: '',
   detailTab: 'main',
   configOpen: false,
+  assetForm: null,
+  assetRevision: 0,
   settingsSection: 'gen',
   orgSection: 'm',
   ctxTokens: 32,
@@ -643,6 +665,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }): Reac
   }, [patch]);
   const setDetailTab = useCallback((tab: string) => patch({ detailTab: tab }), [patch]);
   const setConfigOpen = useCallback((open: boolean) => patch({ configOpen: open }), [patch]);
+  const openAssetForm = useCallback((id?: string | null) => patch({ assetForm: { id: id ?? null } }), [patch]);
+  const closeAssetForm = useCallback(() => patch({ assetForm: null }), [patch]);
+  const bumpAssetRevision = useCallback(() => {
+    setState((prev) => ({ ...prev, assetRevision: prev.assetRevision + 1 }));
+  }, []);
   const setSettingsSection = useCallback((section: string) => patch({ settingsSection: section }), [patch]);
   const setOrgSection = useCallback((section: string) => patch({ orgSection: section }), [patch]);
   const setRightCollapsed = useCallback((value: boolean) => patch({ rightCollapsed: value }), [patch]);
@@ -1476,6 +1503,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }): Reac
       setTheme,
       setDetailTab,
       setConfigOpen,
+      openAssetForm,
+      closeAssetForm,
+      bumpAssetRevision,
       setSettingsSection,
       setOrgSection,
       toggleReadOnly,
@@ -1539,6 +1569,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }): Reac
       setTheme,
       setDetailTab,
       setConfigOpen,
+      openAssetForm,
+      closeAssetForm,
+      bumpAssetRevision,
       setSettingsSection,
       setOrgSection,
       toggleReadOnly,

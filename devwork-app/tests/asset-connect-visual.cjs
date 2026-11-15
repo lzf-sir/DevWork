@@ -165,6 +165,47 @@ const SUBMIT = `() => {
 const DELETE_ASSET = `(assetId) => fetch('/api/assets/' + assetId + '?workspaceId=w-ops', { method: 'DELETE' })
   .then((r) => r.json()).then(() => 'deleted').catch(() => 'failed')`;
 
+/** 点某个侧栏资产行尾的「资产操作」圆点，弹出侧栏菜单（.smenu）。 */
+const OPEN_ASSET_MENU = `(name) => {
+  const row = [...document.querySelectorAll('.aitem')].find((el) => {
+    const t = el.querySelector('.t');
+    return t && (t.textContent || '').trim() === name;
+  });
+  if (!row) return 'no-row';
+  const more = row.querySelector('.more');
+  if (!more) return 'no-more';
+  more.click();
+  return 'opened';
+}`;
+
+/** 点侧栏菜单里文字完全匹配的那一项。 */
+const CLICK_MENU_ITEM = `(label) => {
+  const item = [...document.querySelectorAll('.smenu-i')].find((el) => (el.textContent || '').trim() === label);
+  if (!item) return 'no-item';
+  item.click();
+  return 'clicked';
+}`;
+
+/**
+ * 读编辑态的回显：标题、名称、类型是否锁死、字段值、底部按钮。
+ * 「再次编辑」最容易坏的地方就是回显 —— 字段空了但界面不报错。
+ */
+const READ_EDIT = `() => {
+  document.getAnimations().forEach((a) => { try { a.finish(); } catch (e) { /* 无限动画忽略 */ } });
+  const val = (sel) => { const el = document.querySelector(sel); return el ? el.value : ''; };
+  const typeSel = document.querySelector('#wiz-type');
+  const nameEl = document.querySelector('#wiz-name');
+  return {
+    title: ((document.querySelector('.wiz-h') || {}).textContent || '').trim(),
+    nameValue: nameEl ? nameEl.value : '',
+    typeValue: typeSel ? typeSel.value : '',
+    typeDisabled: typeSel ? typeSel.disabled : false,
+    dirValue: val('#wiz-fld-dir'),
+    submitLabel: [...document.querySelectorAll('.wiz-f .btn')].map((b) => (b.textContent || '').trim()).join(' / '),
+    bindHint: ((document.querySelector('.wiz-sec-n') || {}).textContent || '').trim(),
+  };
+}`;
+
 /**
  * 截图。
  *
@@ -354,8 +395,42 @@ app.whenReady().then(async () => {
     view.result.slice(0, 200), view.result.includes('不执行远端连通性探测'));
   await shot(win, '08-submitted');
 
+  /* 11. 再次编辑：同一个弹窗要从侧栏菜单打开、字段全部回显、类型锁死、能真的存回去。 */
+  const created = await win.webContents.executeJavaScript(`(${READ_VIEW})()`);
+  const editId = (created.result.match(/id=([a-z0-9-]+)/i) || [])[1];
+  await win.webContents.executeJavaScript(`(${CLOSE_MODAL})()`);
+  await sleep(900);
+  const menuOpened = await win.webContents.executeJavaScript(`(${OPEN_ASSET_MENU})('视觉验收-知识库')`);
+  check('侧栏资产菜单能打开', 'opened', menuOpened, menuOpened === 'opened');
+  await sleep(300);
+  const editClicked = await win.webContents.executeJavaScript(`(${CLICK_MENU_ITEM})('编辑资产…')`);
+  check('菜单里有「编辑资产…」且能点', 'clicked', editClicked, editClicked === 'clicked');
+  await sleep(600);
+  const edit = await win.webContents.executeJavaScript(`(${READ_EDIT})()`);
+  check('编辑态标题是「编辑资产」', '含 编辑资产', edit.title, edit.title.includes('编辑资产'));
+  check('名称已回显', '视觉验收-知识库', edit.nameValue, edit.nameValue === '视觉验收-知识库');
+  check('类型已回显且锁死', 'kb / disabled', `${edit.typeValue} / ${edit.typeDisabled}`,
+    edit.typeValue === 'kb' && edit.typeDisabled === true);
+  check('类型专属字段已回显（文档目录=docs）', 'docs', edit.dirValue, edit.dirValue === 'docs');
+  check('底部按钮是保存而不是接入', '含 保存', edit.submitLabel, edit.submitLabel.includes('保存'));
+  await shot(win, '09-edit-prefilled');
+
+  /* 12. 改个名字存回去：回读校验保存真的生效。 */
+  await win.webContents.executeJavaScript(`(${SET_INPUT})('#wiz-name', '视觉验收-知识库-改')`);
+  await sleep(250);
+  await win.webContents.executeJavaScript(`(${SUBMIT})()`);
+  await sleep(1800);
+  const saved = await win.webContents.executeJavaScript(`(${READ_VIEW})()`);
+  check('保存给出真实结果（已保存）', '含 已保存', saved.result.slice(0, 120), saved.result.includes('已保存'));
+  await shot(win, '10-edit-saved');
+  if (editId) {
+    const back = await win.webContents.executeJavaScript(
+      `fetch('/api/assets/${editId}?workspaceId=w-ops').then((r) => r.json()).then((j) => (j.data && j.data.name) || 'none')`);
+    check('保存后服务端名称已更新', '视觉验收-知识库-改', back, back === '视觉验收-知识库-改');
+  }
+
   /* 清理：把测试资产删掉，别污染开发库的侧栏。 */
-  const assetId = (view.result.match(/id=([a-z0-9-]+)/i) || [])[1];
+  const assetId = editId || (created.result.match(/id=([a-z0-9-]+)/i) || [])[1];
   if (assetId) {
     const removed = await win.webContents.executeJavaScript(`(${DELETE_ASSET})('${assetId}')`);
     check('测试资产已清理', 'deleted', removed, removed === 'deleted');

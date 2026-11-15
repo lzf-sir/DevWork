@@ -57,7 +57,7 @@ export default function KbDetail(): React.ReactElement {
     return () => {
       alive = false;
     };
-  }, [assetId, loadDocuments]);
+  }, [assetId, state.assetRevision, loadDocuments]);
 
   /* 切文档就重新读盘；文件被删时明确说「磁盘上没有」，不拿旧内容冒充。 */
   useEffect(() => {

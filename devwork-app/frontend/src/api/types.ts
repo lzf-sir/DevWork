@@ -165,6 +165,13 @@ export interface AssetDetail extends Asset {
   activities: Dict[];
   capabilities: Capability[];
   statusBar: Dict;
+  /** 结构化配置（服务端白名单过滤后落库的那份）：编辑表单据此预填，绝不含秘密。 */
+  config?: Dict;
+  /** 连接串 / 仓库地址（config.endpoint 或 config.cloneUrl 的回读值）。 */
+  endpoint?: string;
+  /** 已绑定的鉴权方式与账号名：回显「绑的是谁、用哪种方式」，秘密本身永不回显。 */
+  authMethod?: string;
+  credentialUsername?: string;
 }
 
 export interface Activity {

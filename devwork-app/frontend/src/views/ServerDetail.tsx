@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { api, type TermLine } from '../api/client';
-import { useLiveData, useLiveRefresh } from '../api/live';
+import { useLiveData } from '../api/live';
 import { useAssetTarget } from '../hooks/useAssetTarget';
 import { Banner, DetailHeader, DetailTabs, GearSvg, Pill } from '../components/ui';
 import { ChatIcon, DotsIcon, ServerIcon } from '../components/icons';
@@ -13,8 +13,7 @@ const TABS = [
 
 /** 服务器详情：默认落在终端主功能区；能力授权 / 资产信息收进右侧配置抽屉。 */
 export default function ServerDetail(): React.ReactElement {
-  const { state, setDetailTab, setModal, addToast, setConfigOpen, openAssetChat } = useStore();
-  const refresh = useLiveRefresh();
+  const { state, setDetailTab, addToast, setConfigOpen, openAssetChat, openAssetForm } = useStore();
   /* B2：指标 / KV / 活动 / 能力 / 终端历史 / 黑白名单全部由 REST 装配层提供。 */
   const {
     CAPS_SERVER,
@@ -157,25 +156,13 @@ export default function ServerDetail(): React.ReactElement {
       });
   };
 
-  /** ⋯ 菜单：重命名资产（PATCH /assets/:id）与断开当前会话（DELETE terminal session）。 */
-  const renameAsset = (): void => {
-    setModal({
-      kind: 'prompt',
-      title: `重命名资产 · ${serverAsset?.name ?? '服务器'}`,
-      label: '新的资产名称：',
-      placeholder: serverAsset?.name ?? '新资产名',
-      confirmLabel: '保存',
-      onSubmit: (value: string) => {
-        if (!value.trim()) {
-          addToast('名称不能为空');
-          return;
-        }
-        void api.updateAsset(assetId, { name: value.trim() }).then((envelope) => {
-          addToast(envelope.ok ? '资产已重命名' : `重命名失败：${envelope.error?.message ?? '未知错误'}`);
-          refresh();
-        });
-      },
-    });
+  /** ⋯ 菜单：编辑资产（连接方式 / 主机 / 白名单 / 鉴权一次改完）与断开当前会话。 */
+  const editAsset = (): void => {
+    if (!assetId) {
+      addToast('还没有可编辑的服务器资产');
+      return;
+    }
+    openAssetForm(assetId);
   };
   const disconnectSession = (): void => {
     void api.closeTerminalSession(assetId, sessionId).then((envelope) => {
@@ -239,7 +226,7 @@ export default function ServerDetail(): React.ReactElement {
             </div>
             {menuOpen ? (
               <div className="cmenu" onMouseLeave={() => setMenuOpen(false)}>
-                <div className="cmenu-item" onClick={() => { setMenuOpen(false); renameAsset(); }}>重命名资产</div>
+                <div className="cmenu-item" onClick={() => { setMenuOpen(false); editAsset(); }}>编辑资产…</div>
                 <div className="cmenu-item" onClick={() => { setMenuOpen(false); createSession(); }}>新建终端会话</div>
                 <div className="cmenu-item" onClick={() => { setMenuOpen(false); disconnectSession(); }}>断开当前会话</div>
               </div>

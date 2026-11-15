@@ -397,6 +397,10 @@ export function assetDetailShape(assetId: string): Row | null {
         : '';
   const credentialUser = credential ? str(credential.username) : '';
   const bound = num(row.credential_bound) === 1;
+  /* 配置项与连接参数原样回传给前端：编辑资产时必须能预填 host/port/库名这些值，
+   * 否则「编辑」实际是让人把所有配置再盲敲一遍。config 落库前已经过
+   * sanitizeAssetConfig（按类型白名单 + 敏感键拒绝），所以回读出去不含任何秘密。 */
+  const assetConfig = json<Record<string, unknown>>(row.config, {});
   return {
     id: assetId,
     workspaceId: str(row.workspace_id),
@@ -407,6 +411,11 @@ export function assetDetailShape(assetId: string): Row | null {
     indexProgress: num(row.index_progress),
     credentialBound: bound,
     subtitle: str(row.subtitle),
+    /* 编辑表单的回填源：结构化配置 + 连接串 + 鉴权方式（账号名可回显，秘密永不回显）。 */
+    config: assetConfig,
+    endpoint: str(assetConfig.endpoint) || str(assetConfig.cloneUrl),
+    authMethod,
+    credentialUsername: credentialUser,
     pills: [
       { tone: 'ok', text: type === 'server' ? '在线' : '已连接' },
       { tone: 'ro', text: '只读' },
@@ -421,7 +430,7 @@ export function assetDetailShape(assetId: string): Row | null {
       { k: '工作区', v: str(row.workspace_id) },
       { k: '环境', v: str(row.env) || '—' },
       { k: '连接', v: str(row.subtitle) },
-      { k: 'dbPath', v: json<Row>(row.config, {}).dbPath ?? '' },
+      { k: 'dbPath', v: str(assetConfig.dbPath) },
     ],
     activities,
     capabilities,

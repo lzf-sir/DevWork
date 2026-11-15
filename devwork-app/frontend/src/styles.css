@@ -67,6 +67,13 @@
   /* ── 正文墨色：菜单项等处此前写 var(--ink,#1B1F26) 兜底，
      深色主题下兜底值不变会导致深底深字，这里统一走令牌 ── */
   --ink:var(--gray-900);
+
+  /* ── 顶部两条的高度：布局与「浮在右上角的小按钮」都从这里取 ──
+     踩过的坑：右栏收起后的展开按钮是 position:fixed，之前把 top 写死成 54px
+     （= 44 顶栏 + 10）。会话标签栏（34px）后来加到 chead 上方，54px 就落进了
+     标签栏里，正好压住右端的「协作流」按钮。高度改成算出来的，以后再加一条
+     顶部栏也不会重演。 ── */
+  --h-topbar:44px; --h-stabs:34px;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 /* 图标统一继承文字色：任何容器里的 SVG 都自动跟随 currentColor，不会出现"黑洞图标" */
@@ -86,7 +93,7 @@ body{font-family:var(--ui);background:var(--gray-0);color:var(--gray-900);
 button,input,select,textarea{font-family:inherit}
 
 /* ===== 顶栏 ===== */
-.topbar{height:44px;flex:0 0 44px;display:flex;align-items:center;gap:12px;
+.topbar{height:var(--h-topbar);flex:0 0 var(--h-topbar);display:flex;align-items:center;gap:12px;
   padding:0 14px 0 8px;border-bottom:1px solid var(--gray-200);
   background:linear-gradient(180deg,var(--gray-0),var(--gray-25));
   box-shadow:0 1px 0 rgba(16,24,40,.02);
@@ -476,8 +483,10 @@ code{font-family:var(--mono);font-size:12.5px;background:var(--gray-50);
 .bench-empty-t{font-size:12.5px;font-weight:600;color:var(--gray-900)}
 .bench-empty-d{font-size:11.5px;color:var(--gray-500);line-height:1.75}
 /* 会话面板收起后：展开按钮停在面板原本的右上角（与收起按钮同一坐标，视觉上原地切换）。 */
-/* 收起后：展开按钮与展开态的收起按钮**同坐标**（54/10），折叠前后眼睛不用找位置 */
-.bench-restore{position:fixed;top:54px;right:10px;margin:0;align-self:auto;z-index:60}
+/* 收起后：展开按钮与展开态的收起按钮**同坐标**，折叠前后眼睛不用找位置。
+   top 必须由「顶栏 + 标签栏 + 10px」算出来：写死数字的话，只要有新的顶部栏插进来，
+   按钮就会落到别人的地盘上（会话标签栏那次就把「协作流」按钮压住了）。 */
+.bench-restore{position:fixed;top:calc(var(--h-topbar) + var(--h-stabs) + 10px);right:10px;margin:0;align-self:auto;z-index:60}
 .pbody{flex:1;overflow-y:auto;padding:12px}
 .pb{display:none}
 .pb.on{display:block}
@@ -1390,6 +1399,8 @@ table.g td.cellcp:hover{box-shadow:inset 0 0 0 1px var(--accent-line);color:var(
 .wiz-sec{display:flex;flex-direction:column;gap:11px;padding:12px;
   border:1px solid var(--gray-200);border-radius:var(--r-lg);background:var(--gray-25)}
 .wiz-sec-t{font-size:11.5px;font-weight:600;color:var(--gray-500);letter-spacing:.02em}
+/* 编辑态「已绑定 · 留空不改」：挂在区块标题右边，省掉一行说明又不至于被忽略。 */
+.wiz-sec-n{margin-left:7px;font-weight:400;color:var(--accent)}
 .wiz-fld{display:flex;flex-direction:column;gap:5px}
 .wiz-fld label{display:flex;flex-direction:row;align-items:center;gap:6px;font-size:12px;color:var(--gray-600)}
 .wiz-fld label .req{font-style:normal;font-size:10px;color:var(--danger);background:var(--danger-bg);
@@ -1965,7 +1976,7 @@ table.g th.dbgrid-sorted{color:var(--accent)}
    一行 34px，比 chead（44px）矮一档：它是「窗口边框」层的控件，
    不该和页面标题抢同一档视觉重量。tab 不用卡片式描边，
    只用底色 + 一条 2px 下沿高亮表示激活 —— 一排放 6 个也不会花。 */
-.stabs{height:34px;flex:0 0 34px;display:flex;align-items:stretch;gap:2px;
+.stabs{height:var(--h-stabs);flex:0 0 var(--h-stabs);display:flex;align-items:stretch;gap:2px;
   padding:0 8px;border-bottom:1px solid var(--gray-200);background:var(--gray-50);
   overflow-x:auto;overflow-y:hidden;scrollbar-width:none;user-select:none;-webkit-user-select:none}
 .stabs::-webkit-scrollbar{height:0}
