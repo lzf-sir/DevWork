@@ -41,7 +41,7 @@ function mergeThread(current: Message[], incoming: Message[]): Message[] {
 
 /* ===================== 类型 ===================== */
 
-export type HotkeyKind = 'send' | 'sqlRun' | 'openFile' | 'saveCode' | 'clearTerm' | 'stop' | 'find';
+export type HotkeyKind = 'send' | 'sqlRun' | 'openFile' | 'saveCode' | 'clearTerm' | 'stop' | 'find' | 'searchRepo';
 
 /** 主题偏好。'system' 跟随 prefers-color-scheme，实际生效值由 App 解析。 */
 export type Theme = 'system' | 'light' | 'dark';export const THEME_LABEL: Record<Theme, string> = { system: '跟随系统', light: '浅色', dark: '深色' };
@@ -241,6 +241,8 @@ export type ModalSpec =
       onSubmit: (value: string) => void;
     }
   | { kind: 'command'; title: string; command: string; body: string }
+  /** 敏感规则编辑器：编辑态（草稿 / 增删 / 校验）内聚在组件里，不走这个 spec。 */
+  | { kind: 'rules'; title: string; onClose: () => void; onSaved?: (count: number) => void }
   | { kind: 'files'; title: string; files: string[]; onPick: (file: string) => void };
 
 export interface AppState {

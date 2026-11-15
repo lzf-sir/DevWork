@@ -11,9 +11,17 @@ export { initDemoDatabase } from '../backend/src/db/demo';
 export { seedIfEmpty, ensureAgentV9Assets } from '../backend/src/db/seed';
 export { bootstrapRepo, REPO_ROOT } from '../backend/src/sandbox/bootstrap';
 export { ensureFtsTable, runIndex } from '../backend/src/services/indexer';
-export { deriveToolFace, gatewayToolFace, TOOL_CATALOG } from '../backend/src/config/tool-catalog';
+export {
+  deriveToolFace, gatewayToolFace, TOOL_CATALOG,
+  LEGACY_TOOL_ALIASES, normalizeToolCall, validateToolCatalog, TOOL_FACE_BUDGET,
+} from '../backend/src/config/tool-catalog';
 export { executeAgentTool, API_ENDPOINTS } from '../backend/src/services/agent-tools';
-export { executeFileWrite, executeDbWrite, executeSrvTemplate, rollbackWritePlan } from '../backend/src/services/write-executor';
+export { executeFileWrite, executeFileStrReplace, executeFsManage, executeDbWrite, executeSrvTemplate, rollbackWritePlan } from '../backend/src/services/write-executor';
+export { runSubagent } from '../backend/src/services/subagent';
+export { searchBackend, searchWeb } from '../backend/src/services/web-search';
+export { maskNonCode, extractSymbols, findOccurrences, lexLangOf, summarizeRefs, extractImports } from '../backend/src/services/code-lex';
+export { splitDiffByFile, assembleDiff } from '../backend/src/services/git-diff';
+export { diffRegion } from '../backend/src/services/text-diff';
 export {
   grantSessionApproval, hasSessionApproval, clearSessionApprovals,
   approvalKeyOf, recordWriteDeny, recordWriteSuccess,

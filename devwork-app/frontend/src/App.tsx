@@ -126,6 +126,11 @@ function useGlobalShortcuts(): void {
             event.preventDefault();
             api.emit('saveCode');
             return;
+          /* ⌘⇧F 必须排在 ⌘F 之前：两者都匹配 `key === 'f'`，先到先得。 */
+          case key === 'f' && event.shiftKey && s.view === 'detail-code':
+            event.preventDefault();
+            api.emit('searchRepo');
+            return;
           case key === 'f' && s.view === 'detail-code':
             event.preventDefault();
             api.emit('find');

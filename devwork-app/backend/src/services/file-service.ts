@@ -13,6 +13,7 @@ import { isSensitive } from '../db/repositories';
 import { newId, writeAudit } from '../db/database';
 import { resolveRepoRoot, resolveWorkspaceIdForAsset } from './workspace-repos';
 import { check, kernelIdentity } from '../kernel/permission';
+import { extractSymbols, lexLangOf, maskNonCode } from './code-lex';
 
 export interface SaveResult {
   path: string;
@@ -76,13 +77,20 @@ export async function save(assetId: string, rel: string, content: string, identi
   }
   fs.mkdirSync(path.dirname(absolute), { recursive: true });
   const buffer = Buffer.from(content, 'utf8');
+  /* 先读旧内容：`diskChanged` 承诺的是「磁盘上的字节变没变」，
+   * 所以必须真的比一次。旧实现无条件返回 true —— 用户只是点了一下保存（内容没动）
+   * 也会被记成「改过」，于是所有依赖这个字段的判断（审计、界面标记失效）全都在说谎。 */
+  const previous = ((): string | null => {
+    try { return fs.readFileSync(absolute, 'utf8'); } catch { return null; }
+  })();
   fs.writeFileSync(absolute, buffer);
+  const diskChanged = previous !== content;
   const auditId = writeAudit({
     workspaceId, actor: identity.name, source: 'user',
     action: 'file.save · 用户手动保存', target: rel, result: '放行', severity: 'info',
-    detail: `真实落盘 ${buffer.length} 字节 · diskChanged=true${workspaceNote}`,
+    detail: `真实落盘 ${buffer.length} 字节 · diskChanged=${diskChanged}${workspaceNote}`,
   });
-  return { path: rel, bytesWritten: buffer.length, diskChanged: true, auditId };
+  return { path: rel, bytesWritten: buffer.length, diskChanged, auditId };
 }
 
 /** Agent 发起的写：无条件拒绝，磁盘零变更。 */
@@ -169,6 +177,13 @@ export interface OutlineSymbol {
   label: string;
   /** 符号所在行（1 起）。点击大纲项跳转到该行。 */
   line: number;
+  /**
+   * 符号结束行（1 起）。前端不用，但 Agent 的 `code_view(mode=outline)` 用它
+   * 精确定位区间——没有它，模型只能"从头读"或靠猜。
+   */
+  endLine?: number;
+  /** 所属容器（类名）。用来表达"这是哪个类的方法"，比扁平列表省一轮提问。 */
+  container?: string;
 }
 
 export interface FileOutlineResult {
@@ -194,7 +209,23 @@ interface RepoFilesResult {
 }
 
 /** 递归收集仓库内非敏感文件（跳过 .git / node_modules），带上限。 */
-function repoFiles(root: string, out: string[] = [], depth = 0, state = { truncated: false }): RepoFilesResult {
+/**
+ * 递归列出仓库内文件（仓库相对路径，`/` 分隔）。
+ *
+ * `base` 必须显式往下传：早期版本每次递归都拿**当前目录**当根算 `path.relative`，
+ * 于是深层文件全变成纯文件名（`OrderController.java` 而不是
+ * `src/main/java/order/OrderController.java`）。调用方再 `path.join(root, 文件名)`
+ * 就指向一个不存在的路径，读取失败被 `catch { continue }` 吞掉——引用粗扫因此
+ * 对**所有非根目录文件**静默返回 0，界面上看起来像"这个类没人用"。
+ * 这种"错得很安静"的 bug 只能靠参数语义本身堵住，不能靠调用方小心。
+ */
+function repoFiles(
+  root: string,
+  out: string[] = [],
+  depth = 0,
+  state = { truncated: false },
+  base = root,
+): RepoFilesResult {
   if (depth > TREE_MAX_DEPTH) {
     state.truncated = true;
     return { files: out, truncated: state.truncated };
@@ -208,10 +239,10 @@ function repoFiles(root: string, out: string[] = [], depth = 0, state = { trunca
     }
     if (name === '.git' || name === 'node_modules') continue;
     const absolute = path.join(root, name);
-    const rel = path.relative(root, absolute).replace(/\\/g, '/');
+    const rel = path.relative(base, absolute).replace(/\\/g, '/');
     let stat: fs.Stats;
     try { stat = fs.statSync(absolute); } catch { continue; }
-    if (stat.isDirectory()) repoFiles(absolute, out, depth + 1, state);
+    if (stat.isDirectory()) repoFiles(absolute, out, depth + 1, state, base);
     else if (!isSensitive(rel)) out.push(rel);
   }
   return { files: out, truncated: state.truncated };
@@ -223,30 +254,32 @@ export async function fileOutline(assetId: string, rel: string): Promise<FileOut
   let plain = '';
   try { plain = fs.readFileSync(absolute, 'utf8'); } catch { plain = ''; }
 
-  /* 符号提取：逐行正则，保留行号（Java/TS/JS 通用近似：类/接口/方法/函数声明）。 */
-  const symbols: OutlineSymbol[] = [];
-  const seen = new Set<string>();
-  const lineRegexps = [
-    /(?:public|private|protected)?\s*(?:class|interface|enum)\s+(\w+)/,
-    /(?:public|private|protected)\s+(?:static\s+)?[\w<>[\],\s]+\s+(\w+)\s*\(/,
-    /(?:export\s+)?(?:async\s+)?function\s+(\w+)/,
-    /(?:const|let)\s+(\w+)\s*=\s*(?:async\s*)?\(/,
-  ];
-  plain.split(/\r?\n/).forEach((line, index) => {
-    if (symbols.length >= 14) return;
-    for (const regex of lineRegexps) {
-      const match = regex.exec(line);
-      if (match && !seen.has(match[1])) {
-        seen.add(match[1]);
-        const kind = /class|interface|enum/.test(regex.source) ? 'C' : 'M';
-        symbols.push({ sg: kind, label: kind === 'C' ? match[1] : `${match[1]}(...)`, line: index + 1 });
-        break;
-      }
-    }
-  });
+  /**
+   * 符号提取走词法层（code-lex）：先抹掉注释与字符串再判声明。
+   *
+   * 上一版是逐行正则直接扫原文，后果很具体：`// class FakeController` 这样一行注释
+   * 会在侧边栏里多出一个可点击的符号，点了跳到一行注释。这类"看起来对、其实没有"
+   * 的条目比缺失更消耗信任。
+   *
+   * 上限 40：侧栏是导航用的，再多也翻不过来；截断不可怕，**不说明截断**才可怕。
+   */
+  const lang = lexLangOf(rel);
+  const mask = maskNonCode(plain, lang);
+  const extracted = extractSymbols(mask.masked, plain, lang);
+  const symbols: OutlineSymbol[] = extracted.slice(0, 40).map((item) => ({
+    sg: item.kind === 'class' || item.kind === 'interface' || item.kind === 'enum' || item.kind === 'struct'
+      ? 'C'
+      : item.kind === 'function' || item.kind === 'method'
+        ? 'M'
+        : 'V',
+    label: item.kind === 'function' || item.kind === 'method' ? `${item.name}(...)` : item.name,
+    line: item.line,
+    endLine: item.endLine,
+    container: item.container,
+  }));
   if (symbols.length === 0) symbols.push({ sg: 'X', label: path.basename(rel), line: 1 });
 
-  /* 引用真扫：除本文件外，其他仓库文件中出现符号名即计一次引用。
+  /* 粗扫：除本文件外，其他仓库文件中出现符号名（子串）即计入一个文件。
    * 这一段的代价是「同步遍历 + 逐文件读」，请求期间会占住 Node 主线程 ——
    * 所以必须**有界**：文件数上限 + 每文件只读前 256KB + 命中够多就停。
    * 超限时如实返回 truncated=true，前端据此显示「扫描已截断」。 */
@@ -277,10 +310,23 @@ export async function fileOutline(assetId: string, rel: string): Promise<FileOut
       break;
     }
   }
+  /**
+   * 这里的「引用」是**文件级粗扫**，措辞必须自己交代这件事。
+   *
+   * 判定只有三条弱证据叠起来：符号名长度 > 3、在本文件里是符号、在别的文件里
+   * **作为子串**出现过。于是 `User` 会命中 `UserService`，注释里提一句也算，
+   * `user.save()` 与 `order.save()` 更是分不开。
+   *
+   * 为什么不能改用精确扫描：精确扫描要逐符号抹注释再匹配，40 个符号就是 40 遍整仓，
+   * 侧栏打开一次卡死几十秒。所以分工是——这一栏回答「大概去哪些文件找」，
+   * 精确计数和跨文件归属由 `/files/refs`（点符号的「引」）按需给出。
+   * 两处数字不一致是设计结果，不是 bug；但**不能都叫「引用」**，否则用户会
+   * 以为其中一个算错了。
+   */
   const references = [
     truncated
-      ? `被至少 ${referencingFiles.size} 个文件引用（扫描已截断：仅前 ${TREE_MAX_ENTRIES} 个文件、每文件前 ${Math.round(REFERENCE_SCAN_BYTES / 1024)}KB）`
-      : `被 ${referencingFiles.size} 个文件引用`,
+      ? `被至少 ${referencingFiles.size} 个文件提到（文件级粗扫已截断：仅前 ${TREE_MAX_ENTRIES} 个文件、每文件前 ${Math.round(REFERENCE_SCAN_BYTES / 1024)}KB）`
+      : `被 ${referencingFiles.size} 个文件提到（文件级粗扫：子串命中、含注释与字符串、不区分同名符号）`,
     ...(referencingFiles.size > 0 ? Array.from(referencingFiles).slice(0, 3).map((f) => `· ${f}`) : []),
   ];
 
@@ -304,19 +350,101 @@ export async function fileOutline(assetId: string, rel: string): Promise<FileOut
   return { symbols, references, git, truncated };
 }
 
-/** 真实 git diff（B19）：对 HEAD 的工作区变更；git 不可用时如实报错。 */
-export async function fileDiff(assetId: string, rel: string): Promise<{ diff: string; clean: boolean }> {
+export interface FileDiff {
+  diff: string;
+  /** diff 为空 **且** 文件已被 git 追踪。 */
+  clean: boolean;
+  /**
+   * 文件未被 git 追踪（新增）。
+   *
+   * 为什么必须单独一档：`git diff HEAD` 永远不包含未追踪文件，于是"没有 diff"
+   * 会被读成"没有改动"。但这两句话指向相反的动作——前者是"不用看"，
+   * 后者是"必须看"。空 diff + 未追踪 ≠ clean。
+   */
+  untracked: boolean;
+}
+
+/**
+ * 真实 git diff（B19）：对 HEAD 的工作区变更；git 不可用时如实报错。
+ *
+ * `maxBuffer` 必须显式给：execFileSync 默认 1MB，超过就抛 ENOBUFS。
+ * 原来所有异常都被归成「git 不可用」——于是"这个文件改了 6MB"会被说成"git 没装"，
+ * 而这两句话指向完全不同的下一步。现在把溢出单独成一个错，并给出绕行方式。
+ */
+export async function fileDiff(assetId: string, rel: string): Promise<FileDiff> {
   const root = path.resolve(await resolveRepoRoot(assetId));
   await resolve(assetId, rel);
   let out = '';
+  let status = '';
   try {
     out = execFileSync('git', ['diff', 'HEAD', '--', rel], {
-      cwd: root, encoding: 'utf8', timeout: 5000, windowsHide: true,
+      cwd: root, encoding: 'utf8', timeout: 5000, windowsHide: true, maxBuffer: 8 * 1024 * 1024,
     }).trim();
-  } catch {
+    /* 只在 diff 为空时才问状态：有 diff 就说明已追踪且已改动，多跑一条 git 是浪费。 */
+    if (out === '') {
+      status = execFileSync('git', ['status', '--porcelain', '--', rel], {
+        cwd: root, encoding: 'utf8', timeout: 5000, windowsHide: true,
+      }).trim();
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOBUFS') {
+      throw new ApiFailure('E_DIFF_TOO_LARGE',
+        `${rel} 的 diff 超过 8MB，无法一次装下。改用 code_view(mode=content) 读原文，`
+        + '或缩小 path 范围（按目录/具体文件分开看）');
+    }
     throw new ApiFailure('E_GIT_UNAVAILABLE', 'git 不可用，无法生成 diff');
   }
-  return { diff: out, clean: out === '' };
+  const untracked = status.startsWith('??');
+  return { diff: out, clean: out === '' && !untracked, untracked };
+}
+
+export interface RepoStatusEntry {
+  /** porcelain 的两字符状态码（`M ` / ` M` / `??` / `R ` …）。 */
+  code: string;
+  path: string;
+}
+
+export interface RepoStatus {
+  entries: RepoStatusEntry[];
+  /** 命中敏感规则的条目数：只报数量，不回显路径。 */
+  hiddenSensitive: number;
+  truncated: boolean;
+}
+
+/**
+ * 工作区状态（供 code_view mode=status）。
+ *
+ * 与 fileDiff 的分工：diff 回答"这个文件改了什么"，status 回答"这批活改到了哪些文件"。
+ * 后者以前只能靠模型自己猜文件名一个个 diff，猜就是幻觉的入口。
+ */
+export async function repoStatus(assetId: string, relFilter?: string): Promise<RepoStatus> {
+  const root = path.resolve(await resolveRepoRoot(assetId));
+  if (relFilter) await resolve(assetId, relFilter);
+  let raw = '';
+  try {
+    /* --untracked-files=all：目录级的 `?? dir/` 会把里面的文件藏起来，
+     * 而"新增了哪些文件"正是要看的。 */
+    raw = execFileSync('git', [
+      'status', '--porcelain=v1', '--untracked-files=all', ...(relFilter ? ['--', relFilter] : []),
+    ], { cwd: root, encoding: 'utf8', timeout: 5000, windowsHide: true }).trim();
+  } catch {
+    throw new ApiFailure('E_GIT_UNAVAILABLE', 'git 不可用，无法读取工作区状态');
+  }
+
+  const MAX = 40;
+  const entries: RepoStatusEntry[] = [];
+  let hiddenSensitive = 0;
+  let truncated = false;
+  for (const line of raw ? raw.split('\n') : []) {
+    const code = line.slice(0, 2);
+    /* 重命名是 `R  old -> new`：这里原样保留，拆开反而丢掉"从哪来"。 */
+    const filePath = line.slice(3).trim().replace(/^"|"$/g, '');
+    if (!filePath) continue;
+    if (isSensitive(filePath)) { hiddenSensitive += 1; continue; }
+    if (entries.length >= MAX) { truncated = true; break; }
+    entries.push({ code, path: filePath });
+  }
+  return { entries, hiddenSensitive, truncated };
 }
 
 export function patchId(): string {

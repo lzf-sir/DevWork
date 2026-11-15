@@ -9,8 +9,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { COMMAND_TIMEOUT_MS, MAX_TERMINAL_SESSIONS, TERMINAL_DIR, ensureDirs } from '../config';
-import { COMMAND_BLACKLIST, COMMAND_WHITELIST, SENSITIVE_RULES, SHELL_META } from '../config/rules';
+import { COMMAND_BLACKLIST, COMMAND_WHITELIST, SHELL_META } from '../config/rules';
 import { all, get, newId, nowIso, run, tx, writeAudit } from '../db/database';
+/* 终端过滤必须与文件树 / 索引器同源：规则在设置页改过之后，
+ * 终端还按内置常量放行 `.env`，等于从另一个门把同一份秘密送进上下文。 */
+import { sensitivePatterns } from '../db/repositories';
 import { REPO_ROOT } from '../sandbox/bootstrap';
 import { resolveWorkspaceIdForAsset } from './workspace-repos';
 import { check, kernelIdentity, type PermissionContext } from '../kernel/permission';
@@ -163,15 +166,21 @@ export function whitelistFor(segment: string): (typeof COMMAND_WHITELIST)[number
   );
 }
 
-/** 终端也过滤敏感文件名，避免 ls / cat 把被排除的凭据带进上下文。 */
+/**
+ * 终端输出过滤：只看文件名（basename）。
+ *
+ * 与 `isSensitive`（路径级）刻意不同——终端里 `cat .env` 与 `cat src/.env` 是同一件事，
+ * 而规则里的 `secrets/` 这类目录型规则在 basename 上匹配不到，由 `includes` 兜住。
+ * 数据源统一走 `sensitivePatterns()`，匹配语义按场景各自保留。
+ */
 function isSensitiveName(name: string): boolean {
   const lower = name.toLowerCase().replace(/\\/g, '/').split('/').pop() ?? '';
-  return SENSITIVE_RULES.some((rule) => {
-    const pattern = rule.pattern.toLowerCase();
-    if (pattern.startsWith('*')) return lower.endsWith(pattern.slice(1));
-    if (pattern.endsWith('/')) return lower === pattern.slice(0, -1);
-    if (pattern.startsWith('.')) return lower.startsWith(pattern);
-    return lower.includes(pattern);
+  return sensitivePatterns().some((pattern) => {
+    const patternLower = pattern.toLowerCase();
+    if (patternLower.startsWith('*')) return lower.endsWith(patternLower.slice(1));
+    if (patternLower.endsWith('/')) return lower === patternLower.slice(0, -1);
+    if (patternLower.startsWith('.')) return lower.startsWith(patternLower);
+    return lower.includes(patternLower);
   });
 }
 

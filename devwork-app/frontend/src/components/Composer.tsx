@@ -272,7 +272,11 @@ export default function Composer(props: ComposerProps): React.ReactElement {
       subtitle: skill.availability && !skill.availability.available
         ? `不可用 · 缺少资产：${skill.availability.missing.join(' / ')}`
         : skill.desc,
-      badge: skill.availability && !skill.availability.available ? '不可用' : skill.category,
+      badge: skill.availability && !skill.availability.available
+        ? '不可用'
+        /* 文件技能（SKILL.md）与内置技能混在一个列表里，用户需要一眼看出
+         * "这条是团队自己加的、改它只需改 Markdown"，否则会去翻代码找。 */
+        : (skill.source === 'file' ? `${skill.category} · 扩展` : skill.category),
       disabled: skill.availability ? !skill.availability.available : false,
       payload: skill,
     }));

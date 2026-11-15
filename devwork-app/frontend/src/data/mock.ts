@@ -1312,7 +1312,7 @@ export const MOCK_SKILLS: {
     label: 'Bug 定位',
     desc: '症状澄清 → 日志/代码/数据三层收敛 → 证据链 → 结论与修复建议',
     category: '排障',
-    tools: [{ name: 'code_search' }, { name: 'code_read' }, { name: 'db_query' }, { name: 'kb_search' }, { name: 'srv_log_tail' }],
+    tools: [{ name: 'code_find' }, { name: 'code_view' }, { name: 'db_query' }, { name: 'kb_search' }, { name: 'srv_log_tail' }],
     template:
       '[技能：Bug 定位] 请按「① collect：澄清症状并拉取相关日志 → ② locate：日志→代码→数据三层收敛定位 → '
       + '③ verify：用真实证据复现或排除 → ④ report：结论 + 修复建议（patch 以 diff 文本给出）」四步执行；'
@@ -1334,7 +1334,7 @@ export const MOCK_SKILLS: {
     label: '日志排查',
     desc: '时间窗与范围 → aggregate 摸量 → 取样关联 → 时间线与根因假设',
     category: '排障',
-    tools: [{ name: 'log_query' }, { name: 'srv_status' }, { name: 'code_search' }],
+    tools: [{ name: 'log_query' }, { name: 'srv_status' }, { name: 'code_find' }],
     template:
       '[技能：日志排查] 请按「① frame：定时间窗与服务范围 → ② query：先小 limit 摸量再按需加大 → '
       + '③ correlate：跨服务/关键词关联 → ④ report：时间线 + 根因假设（标注置信依据）」执行；'
@@ -1345,9 +1345,9 @@ export const MOCK_SKILLS: {
     label: 'SQL 分析',
     desc: '读表结构 → EXPLAIN 执行计划 → 索引/扫描量分析 → 优化建议（DDL 仅文本）',
     category: '数据',
-    tools: [{ name: 'db_query' }, { name: 'db_schema' }, { name: 'kb_search' }],
+    tools: [{ name: 'db_query' }, { name: 'db_inspect' }, { name: 'kb_search' }],
     template:
-      '[技能：SQL 分析] 请按「① read：db_schema 看表结构与索引 → ② analyze：EXPLAIN 看执行计划与扫描量 → '
+      '[技能：SQL 分析] 请按「① read：db_inspect（mode=schema）看表结构与索引 → ② analyze：EXPLAIN 看执行计划与扫描量 → '
       + '③ report：优化建议（建议 DDL 一律以文本给出，不执行）」执行；写操作仅限明确确认后的 DML 且走审批。',
   },
   {
@@ -1355,7 +1355,7 @@ export const MOCK_SKILLS: {
     label: '文档生成',
     desc: '读代码与已有文档 → 按模板起草 → 校验引用真实性 → 产出',
     category: '文档',
-    tools: [{ name: 'code_read' }, { name: 'code_search' }, { name: 'kb_search' }, { name: 'code_symbols' }],
+    tools: [{ name: 'code_view' }, { name: 'code_find' }, { name: 'kb_search' }],
     template:
       '[技能：文档生成] 请按「① collect：读代码与已有文档 → ② draft：按结构起草 → '
       + '③ validate：核对文档中引用的接口/参数/行号是否真实存在（防文档幻觉） → ④ present」执行；'
@@ -1366,7 +1366,7 @@ export const MOCK_SKILLS: {
     label: '代码审查（深）',
     desc: '定范围 → 分维度过 checklist → 分级问题清单（blocker/warning/nit）',
     category: '代码',
-    tools: [{ name: 'code_search' }, { name: 'code_read' }, { name: 'code_symbols' }, { name: 'code_diff' }],
+    tools: [{ name: 'code_find' }, { name: 'code_view' }],
     template:
       '[技能：代码审查（深）] 请按「① scope：确定审查范围（diff/文件/符号） → ② review：超时/重试/空值/边界/'
       + '并发/事务分维度过 → ③ report：分级问题清单（blocker/warning/nit），每条指到文件与行」执行；'
@@ -1375,11 +1375,13 @@ export const MOCK_SKILLS: {
   {
     id: 'release-check',
     label: '发布检查',
-    desc: '未提交 diff → 遗留标记 → 近期错误日志 → 服务状态 → 放行/阻断结论',
+    desc: '工作区变更清单 → 关键文件 diff → 遗留标记 → 近期错误日志 → 服务状态 → 放行/阻断结论',
     category: '代码',
-    tools: [{ name: 'code_diff' }, { name: 'code_todos' }, { name: 'log_query' }, { name: 'srv_status' }],
+    tools: [{ name: 'code_view' }, { name: 'code_todos' }, { name: 'log_query' }, { name: 'srv_status' }],
     template:
-      '[技能：发布检查] 请按「① diff：code_diff 过未提交变更 → ② todos：code_todos 扫遗留标记（新增 FIXME/阻断性 TODO 要点名） → '
+      '[技能：发布检查] 请按「① diff：先 code_view（mode=status）拿整仓变更清单（没路径也能列，比逐个猜文件靠谱）→ '
+      + '对风险最高的 2-3 个文件再 code_view（mode=diff）看具体改动；清单里若出现本次没碰过的文件，说明还有别的改动来源，必须点名，别默认都是这批改动 → '
+      + '② todos：code_todos 扫遗留标记（结果带 @ 所属方法；新增 FIXME/阻断性 TODO 要点名并给出归属） → '
       + '③ errors：log_query 查近期 ERROR/WARN → ④ status：srv_status 确认当前服务状态 → '
       + '⑤ verdict：给出 放行 / 带条件放行 / 阻断 结论与依据」执行；每一步引用真实工具结果，查不到就明说，不猜。',
   },
@@ -1388,10 +1390,10 @@ export const MOCK_SKILLS: {
     label: 'API 探查',
     desc: '端点规范 → 白名单内真实调用验证 → 代码定位 → 调用说明',
     category: '代码',
-    tools: [{ name: 'api_spec_read' }, { name: 'api_call_read' }, { name: 'kb_search' }, { name: 'code_search' }],
+    tools: [{ name: 'api_spec_read' }, { name: 'api_call_read' }, { name: 'kb_search' }, { name: 'code_find' }],
     template:
       '[技能：API 探查] 请按「① spec：api_spec_read 列端点规范 → ② probe：api_call_read 在只读白名单内真实调用验证（路径不在白名单就明说，不去猜） → '
-      + '③ locate：code_search 定位对应实现 → ④ present：给出请求形态、响应示例与实现位置」执行；'
+      + '③ locate：code_find（mode=index）定位对应实现 → ④ present：给出请求形态、响应示例与实现位置」执行；'
       + '全程只读端点，禁止构造副作用调用。',
   },
   {
@@ -1399,10 +1401,10 @@ export const MOCK_SKILLS: {
     label: '性能分诊',
     desc: '慢请求摸量 → 表规模画像 → 代码热点定位 → 分诊结论',
     category: '排障',
-    tools: [{ name: 'log_query' }, { name: 'db_tables' }, { name: 'db_query' }, { name: 'db_schema' }, { name: 'code_search' }],
+    tools: [{ name: 'log_query' }, { name: 'db_inspect' }, { name: 'db_query' }, { name: 'code_find' }],
     template:
-      '[技能：性能分诊] 请按「① measure：log_query 摸慢请求量与分布（先窄时间窗） → ② profile：db_tables 看表规模，db_query+EXPLAIN 看扫描量 → '
-      + '③ locate：code_search 找到对应查询实现 → ④ triage：分诊结论（索引缺失/查询写法/数据量/服务资源），每条带证据」执行；'
+      '[技能：性能分诊] 请按「① measure：log_query 摸慢请求量与分布（先窄时间窗） → ② profile：db_inspect（mode=counts）看表规模，db_query+EXPLAIN 看扫描量 → '
+      + '③ locate：code_find（mode=index）找到对应查询实现 → ④ triage：分诊结论（索引缺失/查询写法/数据量/服务资源），每条带证据」执行；'
       + '优化建议以文本给出，DML 走审批。',
   },
   {
@@ -1430,7 +1432,7 @@ export const MOCK_SKILLS: {
     label: '代码审查',
     desc: '定位变更 → 检查超时重试与边界 → 给风险等级和改法',
     category: '代码',
-    tools: [{ name: 'code_search' }],
+    tools: [{ name: 'code_find' }],
     template:
       '[技能：代码审查] 请按「① 定位变更文件与关键方法 → ② 检查超时/重试/空值与边界 → ③ 给出风险等级与具体改法」审查；'
       + '只做只读检索，不要修改任何文件，每条问题都要指到文件与行。',
@@ -1440,7 +1442,7 @@ export const MOCK_SKILLS: {
     label: '故障复盘',
     desc: '现象 → 时间线 → 直接/根本原因 → 改进项',
     category: '排障',
-    tools: [{ name: 'pg_sql_query' }, { name: 'kb_search' }, { name: 'code_search' }],
+    tools: [{ name: 'pg_sql_query' }, { name: 'kb_search' }, { name: 'code_find' }],
     template:
       '[技能：故障复盘] 请按「① 现象与影响面 → ② 关键时间线与证据 → ③ 直接原因 / 根本原因 → ④ 改进项与验收标准」四段输出；'
       + '每条结论都要有引用，缺证据就写「无证据」，不要用常识补齐。',
@@ -1472,6 +1474,8 @@ export const SHORTCUTS = [
   { key: '⌘. / Ctrl+.', desc: '停止生成' },
   { key: '⌘P / Ctrl+P', desc: '打开文件（代码库详情页内）' },
   { key: '⌘S / Ctrl+S', desc: '保存（代码编辑器内）' },
+  { key: '⌘F / Ctrl+F', desc: '在当前文件内查找（代码编辑器内）' },
+  { key: '⌘⇧F / Ctrl+Shift+F', desc: '全库检索（查整仓索引，与文件内查找不是一回事）' },
   { key: '⌘L / Ctrl+L', desc: '清屏（服务器终端内）' },
   { key: '?', desc: '快捷键速查' },
 ];

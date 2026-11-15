@@ -66,7 +66,7 @@ import {
 } from '../services/llm-gateway';
 import { SKILL_REGISTRY, skillShape, validateSkillRegistry } from '../config/skills';
 import { deleteSecret } from '../services/secret-store';
-import { deriveToolFace } from '../config/tool-catalog';
+import { deriveToolFace, validateToolCatalog } from '../config/tool-catalog';
 import { CMD_TEMPLATES } from '../config/cmd-templates';
 import { bind, credentialSecret, renew, revoke } from '../services/credential';
 import {
@@ -101,6 +101,12 @@ export function registerToolRoutes(app: Express): void {
 
   /* ---------------- 派生工具面 / 命令模板库（诊断与模型自描述） ---------------- */
   app.get('/api/tools', wrap(async (req: Request, res: Response) => {
+    /* 与 /api/skills 同口径：自检不过就 500 报出来。
+     * 工具目录与权限表漂移的后果是"换个名字就能绕过审批"，静默返回一个错的面更糟。 */
+    const catalogProblems = validateToolCatalog();
+    if (catalogProblems.length > 0) {
+      throw new ApiFailure('E_INTERNAL', `工具目录自检失败：${catalogProblems.join('；')}`);
+    }
     const workspaceId = queryString(req, 'workspaceId', DEFAULT_WORKSPACE_ID);
     const face = await deriveToolFace(workspaceId);
     /* 精简形态：entry/schema 全量对象对诊断 UI 是噪音，只留契约字段（前端 ToolFaceTool）。 */

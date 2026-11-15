@@ -54,6 +54,7 @@ import {
 } from '../services/sql-browse';
 import { runDocIndex, runIndex, searchAsset as searchIndex } from '../services/indexer';
 import { agentWrite, fileDiff, fileOutline, generatePatch, readContent, save } from '../services/file-service';
+import { findSymbolOccurrences, scanTodos } from '../services/code-nav';
 import {
   cloneRepository,
   ensureWorkspaceDir,
@@ -102,6 +103,52 @@ export function registerFileRoutes(app: Express): void {
     const assetId = await requireAssetId(req);
     ok(res, await fileOutline(assetId, queryString(req, 'path', 'src/main/java/order/InventoryClient.java')));
   }));
+  /**
+   * 符号级引用（界面右侧「引用」面板的数据源）。
+   *
+   * 与 `files/outline` 里的 `references` **不是同一种东西**，两者数字不一致是正常的：
+   *   · outline → 文件级粗扫：任何符号名在别的文件里**作为子串**出现过就算一次，
+   *     注释与字符串照算，同名不同符号也合并。它回答的是「大概去哪些文件找」；
+   *   · 本路由 → 符号级精确：先抹掉注释与字符串再匹配，并按 import 关系做跨文件收敛。
+   *     它回答的是「这 N 处到底是不是同一个符号」。
+   * 界面必须分开表述，不能让用户以为其中一个错了。
+   *
+   * 整仓扫描（有界：文件数 4000、单文件 512KB）是同步的，所以超时放宽；
+   * symbols 只收单个标识符——传正则或整段文本请走 code_find(mode=regex)。
+   */
+  app.get('/api/assets/:id/files/refs', wrap(async (req: Request, res: Response) => {
+    const assetId = await requireAssetId(req);
+    const symbol = queryString(req, 'symbol', '').trim();
+    if (!/^[A-Za-z_$][\w$]*$/.test(symbol)) {
+      throw new ApiFailure(
+        'E_VALIDATION',
+        `symbol 必须是单个标识符（字母/数字/下划线/$，且不以数字开头）：${symbol || '（空）'}`,
+      );
+    }
+    ok(res, await findSymbolOccurrences(assetId, symbol, { max: Number(queryString(req, 'max', '40')) }));
+  }));
+
+  /**
+   * 遗留标记（TODO / FIXME / HACK）—— 界面右栏「遗留标记」与底部明细面板的数据源。
+   *
+   * 与 `code_todos` 工具**同一实现**（`scanTodos`），所以那些让工具不撒谎的字段
+   * 在这里也必须原样透出：`owner`（所属符号，`undefined` 还得分「模块级」和「非代码文件」两种）、
+   * `skippedLarge` / `walkTruncated` / `stoppedAtCap`（三个独立的"为什么可能没扫全"）。
+   * 任何在路由层把它们压成一个 `truncated` 的写法，都会让界面失去说真话的依据。
+   *
+   * 整仓遍历是同步的，同 refs 一样是「点一次付一次」：界面不自动触发。
+   */
+  app.get('/api/assets/:id/files/todos', wrap(async (req: Request, res: Response) => {
+    const assetId = await requireAssetId(req);
+    const subPath = queryString(req, 'subPath', '').trim();
+    ok(res, await scanTodos(assetId, {
+      /* scanTodos 内部把 max 夹在 1..100，默认就给上限值：界面要的是"能看多少给多少"，
+         再由 stoppedAtCap 告诉用户这次是否提前结束。 */
+      max: Number(queryString(req, 'max', '100')),
+      ...(subPath ? { subPath } : {}),
+    }));
+  }));
+
   app.get('/api/assets/:id/files/git', wrap(async (req: Request, res: Response) => {
     const assetId = await requireAssetId(req);
     ok(res, await gitSummary(assetId));

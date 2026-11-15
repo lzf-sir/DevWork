@@ -506,14 +506,13 @@ export default function SettingsView(): React.ReactElement {
         });
         return;
       case 'rules':
-        void api.getSensitiveRules().then((envelope) => {
-          const rules = envelope.ok ? envelope.data : [];
-          setModal({
-            kind: 'info',
-            title: `敏感文件排除规则 · ${rules.length} 条`,
-            body: (rules.length > 0 ? rules.map((r) => `· ${r.pattern}`) : ['命中者不索引、不进入上下文。']).join('\n'),
-            mono: true,
-          });
+        /* 直接开编辑器。原来这里先弹一个只读 modal：看一眼规则数，再关掉，
+         * 然后去别处找改的地方——而那个"别处"从来不存在。 */
+        setModal({
+          kind: 'rules',
+          title: '敏感文件排除规则',
+          onClose: () => setModal(null),
+          onSaved: (count) => setEnv((prev) => ({ ...prev, sensitiveCount: count })),
         });
         return;
       case 'export-diag':
@@ -787,6 +786,7 @@ export default function SettingsView(): React.ReactElement {
                       {group.section.id === 'model' ? <ModelConfigCard values={values} setValue={setValue} /> : null}
                       {group.section.id === 'perm' ? <ToolFaceCard /> : null}
                       {group.section.id === 'perm' ? <BrowserPrivateRow /> : null}
+                      {group.section.id === 'perm' ? <WebSearchRow /> : null}
                       {group.section.id === 'about' ? <AboutBoundaryRow /> : null}
                       {group.section.id === 'archive' ? <ArchiveManagerCard /> : null}
                       {group.rows
@@ -812,6 +812,7 @@ export default function SettingsView(): React.ReactElement {
                 {activeSection.id === 'model' ? <ModelConfigCard values={values} setValue={setValue} /> : null}
                 {activeSection.id === 'perm' ? <ToolFaceCard /> : null}
                 {activeSection.id === 'perm' ? <BrowserPrivateRow /> : null}
+                {activeSection.id === 'perm' ? <WebSearchRow /> : null}
                 {activeSection.id === 'about' ? <AboutBoundaryRow /> : null}
                 {activeSection.id === 'archive' ? <ArchiveManagerCard /> : null}
                 {activeSection.rows
@@ -887,6 +888,54 @@ function BrowserPrivateRow(): React.ReactElement {
         <div className="sd2">
           Agent 浏览器工具默认不可访问本机与内网地址；如需自托管内网 Wiki 等场景，
           需在启动前设置该环境变量。
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 外部检索（web_search）的接入状态。
+ *
+ * 这一行的存在理由是"不能让用户以为搜不到是 Agent 笨"：
+ * 没配 `DEVWORK_SEARCH_URL` 时 `web_search` 会明确报错并给替代路径，
+ * 但如果界面上什么都不说，用户只会看到 Agent 反复说"抓不到"。
+ *
+ * 三态与 BrowserPrivateRow 同口径（始终渲染 / 拿不到就说不确定 / 不做成可点控件）：
+ * 打包态改不了环境变量，能点但点不动的开关就是新的界面说谎。
+ */
+function WebSearchRow(): React.ReactElement {
+  const [enabled, setEnabled] = useState<boolean | undefined>(undefined);
+  const [offline, setOffline] = useState<boolean>(false);
+
+  useEffect(() => {
+    let alive = true;
+    void api.health().then((envelope) => {
+      if (!alive) return;
+      if (!envelope.ok) {
+        setOffline(true);
+        return;
+      }
+      setEnabled(envelope.data.webSearch);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const stateText = offline || enabled === undefined
+    ? '外部检索：未获取到状态'
+    : enabled
+      ? '外部检索：已接入（由环境变量 DEVWORK_SEARCH_URL 提供）'
+      : '外部检索：未接入（web_search 会直接报错，只能用 web_fetch 打开已知地址）';
+
+  return (
+    <div className="srow">
+      <div className="sl">
+        <div className="sn">{stateText}</div>
+        <div className="sd2">
+          未接入搜索后端时，Agent 不会编造搜索结果，而是明确告诉你无法检索；
+          需要该能力可在启动前设置 SearXNG 兼容的检索地址。
         </div>
       </div>
     </div>

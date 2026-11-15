@@ -12,6 +12,7 @@
  *  3. budget 是真实预算：maxToolCalls 由会话编排消费，防循环烧工具调用。
  */
 import { TOOL_REGISTRY } from './tools';
+import { loadFileSkills, summarizeMethodology, type FileSkill } from '../services/skill-loader';
 
 export type SkillCategory = '排障' | '数据' | '代码' | '文档';
 export type SkillAssetType = 'code' | 'db' | 'server' | 'kb' | 'log' | 'api';
@@ -31,9 +32,20 @@ export interface SkillSpec {
   budget: { maxToolCalls: number };
   /** V2 写工具声明（批准后走三层防线执行管线）。 */
   writeTools?: string[];
+  /** 来处：builtin = 随代码发布（与前端镜像同源）；file = skills/<id>/SKILL.md。 */
+  source?: 'builtin' | 'file';
+  /** 触发场景：模型据此判断该不该加载（文件技能才有）。 */
+  whenToUse?: string;
+  /** 完整方法论：skill(mode=load) 时进上下文；内置技能的历史正文即 template。 */
+  methodology?: string;
 }
 
-export const SKILL_REGISTRY: SkillSpec[] = [
+/**
+ * 内置技能（随代码发布）。
+ * 与前端离线镜像 `frontend/src/data/mock.ts` 的 MOCK_SKILLS 逐字段一致，
+ * 由 `tests/skills.mjs` 把关——这份是"菜单能离线渲染"的底线，不要在这里加玩笑项。
+ */
+const BUILTIN_SKILLS: SkillSpec[] = [
   /* ================= 设计 §4 六大预置 Skill ================= */
   {
     id: 'bug-locator',
@@ -42,7 +54,7 @@ export const SKILL_REGISTRY: SkillSpec[] = [
     category: '排障',
     requiresAssets: ['code'],
     budget: { maxToolCalls: 40 },
-    tools: ['code_search', 'code_read', 'db_query', 'kb_search', 'srv_log_tail'],
+    tools: ['code_find', 'code_view', 'db_query', 'kb_search', 'srv_log_tail'],
     writeTools: ['code_edit'],
     template:
       '[技能：Bug 定位] 请按「① collect：澄清症状并拉取相关日志 → ② locate：日志→代码→数据三层收敛定位 → '
@@ -70,7 +82,7 @@ export const SKILL_REGISTRY: SkillSpec[] = [
     category: '排障',
     requiresAssets: ['log'],
     budget: { maxToolCalls: 30 },
-    tools: ['log_query', 'srv_status', 'code_search'],
+    tools: ['log_query', 'srv_status', 'code_find'],
     template:
       '[技能：日志排查] 请按「① frame：定时间窗与服务范围 → ② query：先小 limit 摸量再按需加大 → '
       + '③ correlate：跨服务/关键词关联 → ④ report：时间线 + 根因假设（标注置信依据）」执行；'
@@ -83,10 +95,10 @@ export const SKILL_REGISTRY: SkillSpec[] = [
     category: '数据',
     requiresAssets: ['db'],
     budget: { maxToolCalls: 25 },
-    tools: ['db_query', 'db_schema', 'kb_search'],
+    tools: ['db_query', 'db_inspect', 'kb_search'],
     writeTools: ['db_query_write'],
     template:
-      '[技能：SQL 分析] 请按「① read：db_schema 看表结构与索引 → ② analyze：EXPLAIN 看执行计划与扫描量 → '
+      '[技能：SQL 分析] 请按「① read：db_inspect（mode=schema）看表结构与索引 → ② analyze：EXPLAIN 看执行计划与扫描量 → '
       + '③ report：优化建议（建议 DDL 一律以文本给出，不执行）」执行；写操作仅限明确确认后的 DML 且走审批。',
   },
   {
@@ -96,7 +108,7 @@ export const SKILL_REGISTRY: SkillSpec[] = [
     category: '文档',
     requiresAssets: ['code'],
     budget: { maxToolCalls: 30 },
-    tools: ['code_read', 'code_search', 'kb_search', 'code_symbols'],
+    tools: ['code_view', 'code_find', 'kb_search'],
     writeTools: ['fs_write_file'],
     template:
       '[技能：文档生成] 请按「① collect：读代码与已有文档 → ② draft：按结构起草 → '
@@ -110,7 +122,7 @@ export const SKILL_REGISTRY: SkillSpec[] = [
     category: '代码',
     requiresAssets: ['code'],
     budget: { maxToolCalls: 30 },
-    tools: ['code_search', 'code_read', 'code_symbols', 'code_diff'],
+    tools: ['code_find', 'code_view'],
     template:
       '[技能：代码审查（深）] 请按「① scope：确定审查范围（diff/文件/符号） → ② review：超时/重试/空值/边界/'
       + '并发/事务分维度过 → ③ report：分级问题清单（blocker/warning/nit），每条指到文件与行」执行；'
@@ -119,13 +131,15 @@ export const SKILL_REGISTRY: SkillSpec[] = [
   {
     id: 'release-check',
     label: '发布检查',
-    desc: '未提交 diff → 遗留标记 → 近期错误日志 → 服务状态 → 放行/阻断结论',
+    desc: '工作区变更清单 → 关键文件 diff → 遗留标记 → 近期错误日志 → 服务状态 → 放行/阻断结论',
     category: '代码',
     requiresAssets: ['code', 'log'],
     budget: { maxToolCalls: 25 },
-    tools: ['code_diff', 'code_todos', 'log_query', 'srv_status'],
+    tools: ['code_view', 'code_todos', 'log_query', 'srv_status'],
     template:
-      '[技能：发布检查] 请按「① diff：code_diff 过未提交变更 → ② todos：code_todos 扫遗留标记（新增 FIXME/阻断性 TODO 要点名） → '
+      '[技能：发布检查] 请按「① diff：先 code_view（mode=status）拿整仓变更清单（没路径也能列，比逐个猜文件靠谱）→ '
+      + '对风险最高的 2-3 个文件再 code_view（mode=diff）看具体改动；清单里若出现本次没碰过的文件，说明还有别的改动来源，必须点名，别默认都是这批改动 → '
+      + '② todos：code_todos 扫遗留标记（结果带 @ 所属方法；新增 FIXME/阻断性 TODO 要点名并给出归属） → '
       + '③ errors：log_query 查近期 ERROR/WARN → ④ status：srv_status 确认当前服务状态 → '
       + '⑤ verdict：给出 放行 / 带条件放行 / 阻断 结论与依据」执行；每一步引用真实工具结果，查不到就明说，不猜。',
   },
@@ -136,10 +150,10 @@ export const SKILL_REGISTRY: SkillSpec[] = [
     category: '代码',
     requiresAssets: ['api'],
     budget: { maxToolCalls: 20 },
-    tools: ['api_spec_read', 'api_call_read', 'kb_search', 'code_search'],
+    tools: ['api_spec_read', 'api_call_read', 'kb_search', 'code_find'],
     template:
       '[技能：API 探查] 请按「① spec：api_spec_read 列端点规范 → ② probe：api_call_read 在只读白名单内真实调用验证（路径不在白名单就明说，不去猜） → '
-      + '③ locate：code_search 定位对应实现 → ④ present：给出请求形态、响应示例与实现位置」执行；'
+      + '③ locate：code_find（mode=index）定位对应实现 → ④ present：给出请求形态、响应示例与实现位置」执行；'
       + '全程只读端点，禁止构造副作用调用。',
   },
   {
@@ -149,11 +163,11 @@ export const SKILL_REGISTRY: SkillSpec[] = [
     category: '排障',
     requiresAssets: ['db', 'log', 'code'],
     budget: { maxToolCalls: 30 },
-    tools: ['log_query', 'db_tables', 'db_query', 'db_schema', 'code_search'],
+    tools: ['log_query', 'db_inspect', 'db_query', 'code_find'],
     writeTools: ['db_query_write'],
     template:
-      '[技能：性能分诊] 请按「① measure：log_query 摸慢请求量与分布（先窄时间窗） → ② profile：db_tables 看表规模，db_query+EXPLAIN 看扫描量 → '
-      + '③ locate：code_search 找到对应查询实现 → ④ triage：分诊结论（索引缺失/查询写法/数据量/服务资源），每条带证据」执行；'
+      '[技能：性能分诊] 请按「① measure：log_query 摸慢请求量与分布（先窄时间窗） → ② profile：db_inspect（mode=counts）看表规模，db_query+EXPLAIN 看扫描量 → '
+      + '③ locate：code_find（mode=index）找到对应查询实现 → ④ triage：分诊结论（索引缺失/查询写法/数据量/服务资源），每条带证据」执行；'
       + '优化建议以文本给出，DML 走审批。',
   },
   /* ================= 原有技能（保留，前端镜像有对应项） ================= */
@@ -188,7 +202,7 @@ export const SKILL_REGISTRY: SkillSpec[] = [
     category: '代码',
     requiresAssets: ['code'],
     budget: { maxToolCalls: 20 },
-    tools: ['code_search'],
+    tools: ['code_find'],
     template:
       '[技能：代码审查] 请按「① 定位变更文件与关键方法 → ② 检查超时/重试/空值与边界 → ③ 给出风险等级与具体改法」审查；'
       + '只做只读检索，不要修改任何文件，每条问题都要指到文件与行。',
@@ -200,7 +214,7 @@ export const SKILL_REGISTRY: SkillSpec[] = [
     category: '排障',
     requiresAssets: ['db', 'kb', 'code'],
     budget: { maxToolCalls: 30 },
-    tools: ['pg_sql_query', 'kb_search', 'code_search'],
+    tools: ['pg_sql_query', 'kb_search', 'code_find'],
     template:
       '[技能：故障复盘] 请按「① 现象与影响面 → ② 关键时间线与证据 → ③ 直接原因 / 根本原因 → ④ 改进项与验收标准」四段输出；'
       + '每条结论都要有引用，缺证据就写「无证据」，不要用常识补齐。',
@@ -219,10 +233,54 @@ export const SKILL_REGISTRY: SkillSpec[] = [
   },
 ];
 
+/**
+ * 文件技能 → SkillSpec。
+ *
+ * template 是**派生**的（正文压成一段摘要）：输入框菜单需要一个能直接发出去的
+ * 一句话模板，而正文动辄几千字，塞进输入框既不可读也不好改。
+ * methodology 保留全文，供 skill(mode=load) 按需加载。
+ */
+function fileSkillsAsSpecs(): SkillSpec[] {
+  const report = loadFileSkills();
+  return report.skills.map((skill: FileSkill) => ({
+    id: skill.id,
+    label: skill.label,
+    desc: skill.desc,
+    category: skill.category as SkillCategory,
+    requiresAssets: skill.requiresAssets as SkillAssetType[],
+    budget: { maxToolCalls: skill.budget },
+    tools: skill.tools,
+    writeTools: skill.writeTools.length > 0 ? skill.writeTools : undefined,
+    source: 'file' as const,
+    whenToUse: skill.whenToUse,
+    methodology: skill.methodology,
+    template: `[技能：${skill.label}] 请按该技能的方法论执行：${summarizeMethodology(skill.methodology)}`,
+  }));
+}
+
+/**
+ * 对外的技能清单 = 内置 + 文件技能。
+ *
+ * 两段的边界：内置项由代码发布、与前端镜像同源（离线菜单靠它）；
+ * 文件项由 `backend/src/skills/<id>/SKILL.md` 提供，团队可自行增删，重启生效。
+ * 合并顺序固定（内置在前），否则前端菜单顺序会在重启后跳来跳去。
+ */
+export const SKILL_REGISTRY: SkillSpec[] = [
+  ...BUILTIN_SKILLS.map((skill) => ({ ...skill, source: 'builtin' as const })),
+  ...fileSkillsAsSpecs(),
+];
+
 /** 登记表自检：只读工具必须存在且真是只读；写工具必须存在且真是写（V2 管线消费）。 */
 export function validateSkillRegistry(): string[] {
   const problems: string[] = [];
+  /* 文件技能的结构问题（frontmatter 缺字段、目录名与 id 不符、工具名不存在）
+   * 由加载器收集——它们不该让整个 /api/skills 500，但也不能静默消失。 */
+  problems.push(...loadFileSkills().problems);
+  /* id 撞车：文件技能与内置技能同名会让 skill(mode=load) 拿到哪一个全凭数组顺序。 */
+  const seen = new Set<string>();
   SKILL_REGISTRY.forEach((skill) => {
+    if (seen.has(skill.id)) problems.push(`${skill.id}: 技能 id 重复（内置与文件技能撞名，请改名）`);
+    seen.add(skill.id);
     if (!skill.template.trim()) problems.push(`${skill.id}: 模板为空`);
     if (!skill.budget?.maxToolCalls || skill.budget.maxToolCalls <= 0) problems.push(`${skill.id}: 预算缺失`);
     skill.tools.forEach((tool) => {
@@ -257,6 +315,11 @@ export function skillShape(skill: SkillSpec, presentTypes?: string[]): Record<st
     requiresAssets: skill.requiresAssets,
     budget: skill.budget,
     availability,
+    /* 来源与正文长度要暴露给前端与诊断：菜单上没有标记的话，
+     * 用户不知道这个技能是谁加进来的、为什么和别人的不一样。 */
+    source: skill.source ?? 'builtin',
+    whenToUse: skill.whenToUse ?? '',
+    methodologyChars: (skill.methodology ?? skill.template).length,
     writeTools: (skill.writeTools ?? []).map((name) => {
       const spec = TOOL_REGISTRY[name];
       return { name, label: spec?.label ?? name, risk: spec?.risk ?? 'unknown', needsApproval: true };

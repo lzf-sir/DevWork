@@ -15,6 +15,7 @@ import {
 } from '../components/ui';
 import { CaretIcon, ChatIcon, CloseIcon, DatabaseIcon, DotsIcon, EditIcon, PlayIcon, TableIcon } from '../components/icons';
 import AssetConfigDrawer from '../components/AssetConfigDrawer';
+import AssetCredential from '../components/AssetCredential';
 import DbObjectTree, { type TreeObject } from '../components/DbObjectTree';
 import DbDataGrid, { type GridSortState } from '../components/DbDataGrid';
 import DbFilterPanel from '../components/DbFilterPanel';
@@ -80,7 +81,6 @@ export default function DatabaseDetail(): React.ReactElement {
   const [resultMeta, setResultMeta] = useState<{ rowCount: number; durationMs: number } | null>(null);
   const [resultColumns, setResultColumns] = useState<string[]>(SQL_RESULT_COLUMNS);
   const [resultRows, setResultRows] = useState<string[][]>(SQL_RESULT_ROWS);
-  const [bound, setBound] = useState<boolean>(false);
   const [menuOpen, setMenuOpen] = useState<boolean>(false);
   const [exportOpen, setExportOpen] = useState<boolean>(false);
   const [filterOpen, setFilterOpen] = useState<boolean>(false);
@@ -296,36 +296,16 @@ export default function DatabaseDetail(): React.ReactElement {
   };
 
   /* ============ 凭据 ============ */
-  const bindCredential = (): void => {
-    setModal({
-      kind: 'prompt',
-      title: '绑定只读凭据',
-      label: '凭据值（将经系统钥匙串 safeStorage 加密存本机，不进数据库、不上云）：',
-      placeholder: 'prod-pg-readonly 的密码 / token',
-      confirmLabel: '绑定',
-      onSubmit: (secret: string) => {
-        void api.bindCredential(assetId, { label: 'prod-pg-readonly', secret }).then((envelope) => {
-          if (!envelope.ok) {
-            addToast(`绑定凭据被拒：${envelope.error?.code ?? 'E_PERMISSION_DENIED'} ${envelope.error?.message ?? ''}`);
-            return;
-          }
-          setBound(true);
-          addToast('凭据已绑定：prod-pg-readonly · 秘密已加密存本机 · 已写入服务端审计');
-        });
-      },
-    });
-  };
-
-  const renewCredential = (): void => {
-    void api.renewCredential(assetId).then((envelope) => {
-      if (!envelope.ok) {
-        addToast(`凭据轮换失败：${envelope.error?.code ?? ''} ${envelope.error?.message ?? ''}`);
-        return;
-      }
-      addToast('凭据已轮换 · 新版本密文已写入本机钥匙串 · 已记入审计');
-      refresh();
-    });
-  };
+  /* 凭据区块自己管状态（五态 + 绑定/轮换/吊销），这里只传资产与标签。
+   * 原来这块是写死的「已绑定 prod-pg-readonly · 最后使用 刚刚」，
+   * 刷新页面就变回"未绑定"——因为 bound 只是组件内的一个布尔。 */
+  const credentialBlock = (
+    <AssetCredential
+      assetId={assetId}
+      label={`${dbAsset?.name ?? 'order_db'} · 只读凭据`}
+      onChanged={refresh}
+    />
+  );
 
   const newQuery = (): void => {
     setActiveTab(QUERY_TAB);
@@ -408,28 +388,6 @@ export default function DatabaseDetail(): React.ReactElement {
       .map((filter) => `${filter.column} ${filter.operator} ${filter.value === '' ? "''" : filter.value}`)
       .join(' AND ');
   }, [active]);
-
-  const credentialBlock = (
-    <div>
-      {bound ? (
-        <>
-          已绑定 prod-pg-readonly · 最后使用 刚刚
-          <br />
-          <button className="btn" onClick={renewCredential}>
-            轮换凭据
-          </button>
-        </>
-      ) : (
-        <>
-          <span style={{ color: 'var(--warning)' }}>未绑定 · 需要你自己的只读账号</span>
-          <br />
-          <button className="btn p" onClick={bindCredential}>
-            绑定凭据
-          </button>
-        </>
-      )}
-    </div>
-  );
 
   const kvRows = [
     { k: '连接串', v: <>{DB_CONN_KV[0]?.v}</> },

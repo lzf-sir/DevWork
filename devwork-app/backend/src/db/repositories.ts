@@ -387,7 +387,7 @@ export function assetDetailShape(assetId: string): Row | null {
   }));
   /* 凭据方式与账号：接入时录入的，详情页要让人看清「绑的是谁、用哪种方式」。 */
   const credential = get<Row>(
-    'SELECT auth_method, username, label FROM credential_binding WHERE asset_id = ?',
+    'SELECT auth_method, username, label, state FROM credential_binding WHERE asset_id = ?',
     assetId,
   );
   const authMethod = credential ? str(credential.auth_method) : '';
@@ -401,6 +401,15 @@ export function assetDetailShape(assetId: string): Row | null {
    * 否则「编辑」实际是让人把所有配置再盲敲一遍。config 落库前已经过
    * sanitizeAssetConfig（按类型白名单 + 敏感键拒绝），所以回读出去不含任何秘密。 */
   const assetConfig = json<Record<string, unknown>>(row.config, {});
+  /* 凭据状态按 5 态报，不压成 bound 布尔：「已吊销」和「未绑定」在库里都是
+   * credential_bound=0，混成一个词会让用户以为从来没配过——而事实是配过、被收回、
+   * 现在需要重新绑。同一屏里凭据区块说「已吊销」、指标卡说「未绑定」是最糟的一种。 */
+  const credentialState = credential ? str(credential.state, 'unbound') : 'unbound';
+  const credentialStateText = credentialState === 'active' ? '已绑定'
+    : credentialState === 'expiring' ? '即将过期'
+      : credentialState === 'expired' ? '已过期'
+        : credentialState === 'revoked' ? '已吊销'
+          : '未绑定';
   return {
     id: assetId,
     workspaceId: str(row.workspace_id),
@@ -424,7 +433,7 @@ export function assetDetailShape(assetId: string): Row | null {
     metrics: [
       { label: '索引状态', value: str(row.status) === 'indexing' ? '索引中' : '已索引', sub: str(row.status) === 'indexing' ? '进行中' : '可用' },
       { label: '资产类型', value: type, sub: str(row.env) || '—' },
-      { label: '凭据', value: bound ? '已绑定' : '未绑定', sub: methodText || '只读' },
+      { label: '凭据', value: credentialStateText, sub: methodText || '只读' },
     ],
     kv: [
       { k: '工作区', v: str(row.workspace_id) },
@@ -435,9 +444,15 @@ export function assetDetailShape(assetId: string): Row | null {
     activities,
     capabilities,
     statusBar: statusBarShape(),
-    credentialLine: !bound
-      ? '尚未绑定凭据'
-      : `只读凭据已绑定${methodText ? ` · ${methodText}` : ''}${credentialUser ? ` · ${credentialUser}` : ''}`,
+    credentialLine: credentialState === 'revoked'
+      ? '凭据已吊销 · 本机密文已删除，需重新绑定'
+      : credentialState === 'expired'
+        ? '凭据已过期，需轮换后才能访问'
+        : credentialState === 'expiring'
+          ? `只读凭据即将到期${methodText ? ` · ${methodText}` : ''}`
+          : credentialState === 'active'
+            ? `只读凭据已绑定${methodText ? ` · ${methodText}` : ''}${credentialUser ? ` · ${credentialUser}` : ''}`
+            : '尚未绑定凭据',
   };
 }
 
@@ -542,24 +557,53 @@ export function auditShape(row: Row): Row {
   };
 }
 
-/** 文件树：敏感文件（12 规则）一律不出现。规则优先读设置页（PUT /api/sensitive-rules 落库值），
- * 库里没有时才回落内置常量 —— 否则规则编辑器改了也不生效。 */
+/**
+ * 当前生效的敏感规则（pattern 列表）。
+ *
+ * 真源只有一个：`setting.privacy.sensitiveRules`（由 PUT /api/sensitive-rules 落库）。
+ * 库里为空时才回落内置常量——那不是「默认值优先」，而是「用户从来没配过」。
+ *
+ * **所有过滤点都必须走这里。** 在这之前有三套口径：文件树读库、索引器读常量、
+ * 终端读常量。于是改完规则只有文件树跟着变，索引里照样把 `.env` 收进去——
+ * 用户以为改完就安全了，这是最坏的一种假话：界面显示生效，底层没生效。
+ *
+ * 空串会被 filter 掉：空 pattern 在 `includes('')` 下恒真，一条空规则就能
+ * 让整个仓库变成"敏感文件"（反过来也可能被用来绕过判断）。
+ */
+export function sensitivePatterns(): string[] {
+  const dbRules = settingRaw('privacy').sensitiveRules;
+  const fromDb = Array.isArray(dbRules)
+    ? dbRules.map((rule) => String(rule).trim()).filter((pattern) => pattern !== '')
+    : [];
+  return fromDb.length > 0 ? fromDb : SENSITIVE_RULES.map((rule) => rule.pattern);
+}
+
+/**
+ * 设置页要看的形状：pattern + 说明。
+ *
+ * `id` 只是渲染 key，不承载身份——整表替换语义下，改一条规则的 pattern
+ * 就等于删掉旧的再新增一条，「同一条规则的身份」这件事在这里不存在。
+ * 界面靠 pattern 本身做去重判断，不靠 id。
+ */
+export function sensitiveRuleDefs(): { id: string; pattern: string; description: string }[] {
+  const known = new Map(SENSITIVE_RULES.map((rule) => [rule.pattern.toLowerCase(), rule.description]));
+  return sensitivePatterns().map((pattern, index) => ({
+    id: `sr${String(index + 1).padStart(2, '0')}`,
+    pattern,
+    description: known.get(pattern.toLowerCase()) ?? '',
+  }));
+}
+
+/** 文件树 / 路径级：敏感文件一律不出现。 */
 export function isSensitive(rel: string): boolean {
-  const dbRules = (settingRaw('privacy')).sensitiveRules;
-  const rules: string[] = Array.isArray(dbRules) && dbRules.length > 0
-    ? dbRules.map(String)
-    : SENSITIVE_RULES.map((rule) => rule.pattern);
   const lower = rel.toLowerCase().replace(/\\/g, '/');
-  return rules.some((pattern) => {
+  return sensitivePatterns().some((pattern) => {
     const patternLower = pattern.toLowerCase();
     if (patternLower.endsWith('/')) {
       const dir = patternLower.slice(0, -1);
       return lower.split('/').includes(dir) || lower.includes(`${dir}/`);
     }
-    if (patternLower.startsWith('*')) {
-      const ext = patternLower.slice(1);
-      return lower.endsWith(ext);
-    }
+    if (patternLower.startsWith('*')) return lower.endsWith(patternLower.slice(1));
     if (patternLower.startsWith('.')) return path.basename(lower).startsWith(patternLower);
     return lower.includes(patternLower);
   });

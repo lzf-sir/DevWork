@@ -318,7 +318,15 @@ export function registerAssetRoutes(app: Express): void {
   }));
   app.post('/api/assets/:id/credential/renew', wrap(async (req: Request, res: Response) => {
     const assetId = await requireAssetId(req);
-    ok(res, await renew(assetId, await identity(req)));
+    /* partial 只让 label / method 变成可选；secret 的必填判断放在服务层——
+     * 那里才说得清「没给新秘密」到底意味着什么（不是轮换，是假装轮换）。 */
+    const payload = parseBody(credentialInputSchema.partial(), req);
+    ok(res, await renew(assetId, await identity(req), {
+      secret: payload.secret,
+      label: payload.label,
+      authMethod: payload.method,
+      username: payload.username,
+    }));
   }));
   app.post('/api/assets/:id/credential/revoke', wrap(async (req: Request, res: Response) => {
     const assetId = await requireAssetId(req);

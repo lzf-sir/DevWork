@@ -81,6 +81,7 @@ import {
 import { bootstrapArtifacts, artifactPath, artifactSize } from '../sandbox/bootstrap';
 import { normalizeBrowserUrl, readBrowserPage, readBrowserState, writeBrowserPage, writeBrowserState } from '../services/browser';
 import { DEFAULT_WORKSPACE_ID, PORT, browserAllowPrivate } from '../config';
+import { searchBackend } from '../services/web-search';
 import { APP_VERSION } from '../config/version';
 
 type Row = Record<string, unknown>;
@@ -104,6 +105,10 @@ export function registerSystemRoutes(app: Express): void {
        * 必须显式为 boolean —— 缺字段时前端 `undefined ? '已放行' : '已拦截'`
        * 会把"没上报"渲染成"已拦截"，等于谎报安全状态。函数每次读 env，故不缓存。 */
       browserAllowPrivate: browserAllowPrivate() === true,
+      /* 外部检索后端是否配置。与 browserAllowPrivate 同理必须是显式 boolean：
+       * 「没上报」不能被前端渲染成「没配置」，否则用户会去查一个其实已经好的配置。
+       * 模型也可以据此决定"先 search 还是直接 fetch"，所以这条口径要能被查到。 */
+      webSearch: searchBackend().configured,
       time: new Date().toISOString(),
     });
   });

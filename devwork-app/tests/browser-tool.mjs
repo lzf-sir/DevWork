@@ -3,8 +3,8 @@
  *
  * 覆盖：
  *   A. 地址规范化：只放行 http/https；Agent 侧禁私有网段，用户侧放行；
- *   B. browser_navigate 工具：真写会话浏览器状态（by=agent）；
- *   C. browser_read_page：读前端回传的页面快照；
+ *   B. browser(mode=navigate)：真写会话浏览器状态（by=agent）；
+ *   C. browser(mode=read)：读前端回传的页面快照；
  *   D. HTTP 集成：/api/conversations/:id/browser 与 /api/artifacts/:id/preview。
  *
  * 用法：npm run test:browser（独立端口 3013，隔离数据目录，不碰 3001 实例）。
@@ -86,15 +86,20 @@ console.log('\n--- A. 地址规范化 ---');
   check('A8 空地址被拒', mod.normalizeBrowserUrl('   ').ok === false);
 }
 
-/* ================= B. browser_navigate 工具 ================= */
-console.log('\n--- B. browser_navigate 工具 ---');
+/* ================= B. browser(mode=navigate) ================= */
+console.log('\n--- B. browser(mode=navigate) ---');
 {
   const face = mod.deriveToolFace('w-ops');
-  const tool = face.all.find((t) => t.name === 'browser_navigate');
-  check('B0 browser_navigate 在派生工具面内（跨资产通用，不依赖具体资产）', !!tool, face.all.map((t) => t.name).join(','));
+  const tool = face.all.find((t) => t.name === 'browser');
+  check('B0 browser 在派生工具面内（跨资产通用，不依赖具体资产）', !!tool, face.all.map((t) => t.name).join(','));
 
   const ctx = { assetId: 'w-ops', workspaceId: 'w-ops', conversationId: convId, identity };
-  const ok = await mod.executeAgentTool('browser_navigate', { url: 'https://example.com/docs' }, tool, ctx);
+  const noMode = await mod.executeAgentTool('browser', { url: 'https://example.com/docs' }, tool, ctx);
+  check('B0b 缺 mode 时直接报错并列出可选值（不靠默认值猜）',
+    noMode.ok === false && noMode.result.includes('navigate') && noMode.result.includes('read'),
+    noMode.result?.slice(0, 140));
+
+  const ok = await mod.executeAgentTool('browser', { mode: 'navigate', url: 'https://example.com/docs' }, tool, ctx);
   check('B1 导航成功（工具返回 ok）', ok.ok === true, ok.result?.slice(0, 120));
 
   const state = mod.readBrowserState(convId);
@@ -102,23 +107,23 @@ console.log('\n--- B. browser_navigate 工具 ---');
     state.url === 'https://example.com/docs' && state.by === 'agent',
     JSON.stringify(state));
 
-  const denied = await mod.executeAgentTool('browser_navigate', { url: 'http://192.168.1.10/' }, tool, ctx);
+  const denied = await mod.executeAgentTool('browser', { mode: 'navigate', url: 'http://192.168.1.10/' }, tool, ctx);
   check('B3 私有网段被工具层拒绝（ok=false 且状态未变）',
     denied.ok === false && mod.readBrowserState(convId).url === 'https://example.com/docs',
     denied.result?.slice(0, 120));
 }
 
-/* ================= C. browser_read_page ================= */
-console.log('\n--- C. browser_read_page ---');
+/* ================= C. browser(mode=read) ================= */
+console.log('\n--- C. browser(mode=read) ---');
 {
-  const tool = mod.deriveToolFace('w-ops').all.find((t) => t.name === 'browser_read_page');
+  const tool = mod.deriveToolFace('w-ops').all.find((t) => t.name === 'browser');
   const ctx = { assetId: 'w-ops', workspaceId: 'w-ops', conversationId: convId, identity };
 
-  const empty = await mod.executeAgentTool('browser_read_page', {}, tool, ctx);
+  const empty = await mod.executeAgentTool('browser', { mode: 'read' }, tool, ctx);
   check('C1 没有页面快照时如实报错（不编造内容）', empty.ok === false, empty.result?.slice(0, 120));
 
   mod.writeBrowserPage(convId, '示例文档', '这是页面正文的第一段。');
-  const read = await mod.executeAgentTool('browser_read_page', {}, tool, ctx);
+  const read = await mod.executeAgentTool('browser', { mode: 'read' }, tool, ctx);
   check('C2 读到前端回传的标题与正文',
     read.ok === true && read.result.includes('示例文档') && read.result.includes('页面正文的第一段'),
     read.result?.slice(0, 160));

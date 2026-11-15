@@ -29,6 +29,12 @@
     "test:db:visual": "node tests/run-electron.cjs db-visual.cjs",
     "test:asset-chat:visual": "node tests/run-electron.cjs asset-chat-visual.cjs",
     "test:layout:visual": "node tests/layout-visual.mjs",
+    "test:refs:visual": "node tests/code-refs-visual.mjs",
+    "test:todos:visual": "node tests/code-todos-visual.mjs",
+    "test:rules:visual": "node tests/sensitive-rules-visual.mjs",
+    "test:cred:visual": "node tests/credential-visual.mjs",
+    "test:save:visual": "node tests/save-integrity-visual.mjs",
+    "test:todos:copy": "npx tsx tests/todo-copy.spec.ts",
     "test:db:theme": "node tests/run-electron.cjs db-theme.cjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p backend/tsconfig.json",
     "build": "node scripts/build.mjs",
@@ -61,7 +67,8 @@
     "test:shadow": "node tests/run-smoke.mjs shadow",
     "test:shadow:visual": "node tests/shadow-visual.mjs",
     "test:shadow:core": "tsx tests/shadow-core.ts",
-    "test:tickets": "node tests/run-smoke.mjs tickets"
+    "test:tickets": "node tests/run-smoke.mjs tickets",
+    "test:search:visual": "node tests/repo-search-visual.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",

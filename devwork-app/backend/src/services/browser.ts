@@ -3,7 +3,7 @@
  *
  * 为什么要有服务端这份状态：
  * 「Agent 能控制浏览器」不能只是文案。要真控制，双方得有一份**都认**的当前地址：
- *   - Agent 调 browser_navigate → 写这里（by=agent）；
+ *   - Agent 调 browser(mode=navigate) → 写这里（by=agent）；
  *   - 用户在右栏浏览器 Tab 里点链接 → 前端把新地址同步回来（by=user）；
  *   - 前端浏览器 Tab 轮询这里，地址变了就跳。
  *
@@ -97,7 +97,7 @@ export function writeBrowserState(conversationId: string, url: string, by: Brows
 }
 
 /**
- * 页面快照：前端把当前页标题与正文回传，Agent 的 browser_read_page 读它。
+ * 页面快照：前端把当前页标题与正文回传，Agent 的 browser(mode=read) 读它。
  *
  * 上限 8000 字符：够回答"这页在说什么"，又不至于把整站塞进上下文预算。
  */

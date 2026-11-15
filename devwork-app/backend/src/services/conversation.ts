@@ -23,9 +23,10 @@ import {
 } from '../db/repositories';
 import { check, type PermissionContext } from '../kernel/permission';
 import { TOOL_REGISTRY, toolAction, toolIsWrite, toolRisk, toolSpec } from '../config/tools';
-import { deriveToolFace, gatewayToolFace, derivedTool, type DerivedTool, type ToolFace } from '../config/tool-catalog';
+import { deriveToolFace, gatewayToolFace, derivedTool, normalizeToolCall, type DerivedTool, type ToolFace } from '../config/tool-catalog';
 import { executeAgentTool } from './agent-tools';
-import { executeFileWrite, executeDbWrite, executeSrvTemplate, rollbackWritePlan } from './write-executor';
+import { executeFileWrite, executeFileStrReplace, executeFsManage, executeDbWrite, executeSrvTemplate, rollbackWritePlan } from './write-executor';
+import { runSubagent } from './subagent';
 import {
   breakerTripped, breakerStatus, recordWriteDeny, recordWriteSuccess,
 } from './session-approvals';
@@ -95,6 +96,9 @@ function targetTypeOf(toolName: string, args: Record<string, unknown>): string {
   }
   if (/db|sql/i.test(toolName)) return 'db';
   if (/srv|service/i.test(toolName)) return 'service';
+  /* 文件组织带的 mode 决定了这次写动的到底是什么：改位置 / 删 / 建目录是三类事，
+   * 审计里混成一句 "code-file" 就分不清了。 */
+  if (toolName === 'fs_manage') return `fs:${String(args.mode ?? 'unknown')}`;
   return 'code-file';
 }
 
@@ -119,13 +123,18 @@ function writeTargetAssetId(toolName: string, tool: DerivedTool | undefined, fac
  * 写计划的统一执行入口（三层防线）。只对 V2 可执行工具真执行；
  * 演示轨迹遗留名（fs_truncate_log 等）没有可执行内容，如实返回不假装。 */
 async function executeWritePlan(
-  toolName: string,
-  args: Record<string, unknown>,
+  rawToolName: string,
+  rawArgs: Record<string, unknown>,
   face: ToolFace,
   identity: Identity,
   workspaceId: string,
   conversationId = '',
 ): Promise<{ ok: boolean; message: string; rollbackRef?: string; diskChanged: boolean }> {
+  /* 审批卡是**冻结的意图**：模型批准前传的是哪个名字，这里就按哪个名字归一。
+   * 旧名（code_edit_str）与正式名（code_edit + mode=replace）走同一条管线。 */
+  const call = normalizeToolCall(rawToolName, rawArgs);
+  const toolName = call.name;
+  const args = call.args;
   const tool = derivedTool(face, toolName);
   const assetId = writeTargetAssetId(toolName, tool, face);
   /* 归属三级：① 资源实际归属 → ② 调用方给的会话归属 → ③ 空串。
@@ -134,10 +143,50 @@ async function executeWritePlan(
    * 任何情况都不回落默认工作区：不认识就记空串，detail 里标 workspace:unknown。 */
   const ownerWorkspaceId = resolveWorkspaceIdForAsset(assetId) ?? workspaceId;
   switch (toolName) {
-    case 'code_edit':
-    case 'fs_write_file':
+    case 'code_edit': {
+      /* mode 缺失时按"有没有 oldString"兜底：有 oldString 就一定是最窄的替换，
+       * 没有才可能是整文件写。兜底方向永远选**改动面更小**的那条，
+       * 因为这里已经过了审批——宁可让用户发现"只改了一段"，也不要多改。 */
+      const mode = String(args.mode ?? (args.oldString === undefined ? 'rewrite' : 'replace')).trim();
+      if (mode === 'replace') {
+        /* 精确替换：precheck 在 write-executor 里再判一次唯一性，
+         * 批准之后文件变了也不动手（审批针对意图，不针对某一时刻的内容）。 */
+        return executeFileStrReplace(
+          assetId,
+          String(args.path ?? ''),
+          String(args.oldString ?? ''),
+          String(args.newString ?? ''),
+          args.replaceAll === true,
+          identity,
+          ownerWorkspaceId,
+          conversationId,
+        );
+      }
+      if (mode !== 'rewrite') {
+        return { ok: false, message: `未知 mode：${mode}（code_edit 只支持 replace / rewrite），未执行任何写操作`, diskChanged: false };
+      }
       /* conversationId 决定快照落点（DATA_DIR/snapshots/<会话>/），不再写进用户仓库。 */
       return executeFileWrite(assetId, String(args.path ?? ''), String(args.content ?? ''), identity, ownerWorkspaceId, conversationId);
+    }
+    case 'fs_write_file':
+      return executeFileWrite(assetId, String(args.path ?? ''), String(args.content ?? ''), identity, ownerWorkspaceId, conversationId);
+    case 'fs_manage': {
+      /* 文件组织：四种 mode 由 write-executor 统一校验双路径。
+       * 这里只做 mode 白名单，不猜默认值（默认值猜错就是"以为复制了其实是移动了"）。 */
+      const mode = String(args.mode ?? '').trim();
+      if (!['move', 'copy', 'mkdir', 'delete'].includes(mode)) {
+        return { ok: false, message: `未知 mode：${mode || '（空）'}（fs_manage 只支持 move / copy / mkdir / delete），未执行任何写操作`, diskChanged: false };
+      }
+      return executeFsManage(
+        assetId,
+        mode as 'move' | 'copy' | 'mkdir' | 'delete',
+        String(args.from ?? ''),
+        String(args.to ?? ''),
+        identity,
+        ownerWorkspaceId,
+        conversationId,
+      );
+    }
     case 'db_query_write':
       return executeDbWrite(String(args.sql ?? ''), identity, ownerWorkspaceId);
     case 'srv_exec': {
@@ -150,7 +199,7 @@ async function executeWritePlan(
       return executeSrvTemplate(assetId, String(args.action ?? ''), params, identity, ownerWorkspaceId);
     }
     default:
-      return { ok: false, message: `工具 ${toolName} 属于演示轨迹遗留名，无可执行内容（不假装执行）`, diskChanged: false };
+      return { ok: false, message: `工具 ${rawToolName} 属于演示轨迹遗留名，无可执行内容（不假装执行）`, diskChanged: false };
   }
 }
 
@@ -190,9 +239,23 @@ export function makeToolExecutor(
   workspaceId: string,
   face: ToolFace,
 ): NonNullable<GatewayContext['executeTool']> {
-  return async (toolName: string, argsJson: string) => {
+  /* 子代理子面要剔除的三类（除了写工具之外）：
+   *   · subtask   —— 防递归：一个任务炸成 N 个子任务，预算与审计都会失控；
+   *   · todo_write —— 进度清单属于主循环的状态，共享 conversationId 会互相覆盖；
+   *   · memo      —— 会话笔记是"事实"的公共载体，子代理写的中间结论会污染主循环的判断。
+   * 子代理的产出走 summary 回传，不需要写笔记。 */
+  const SUBAGENT_DENY = new Set(['subtask', 'todo_write', 'memo']);
+
+  const executor: NonNullable<GatewayContext['executeTool']> = async (rawToolName: string, argsJson: string) => {
     let args: Record<string, unknown> = {};
     try { args = JSON.parse(argsJson) as Record<string, unknown>; } catch { /* 保持空对象 */ }
+
+    /* 旧名（code_read / db_schema / skill_load …）在这里归一成正式名 + 固定 mode：
+     * 派生面绑定、能力裁决、审计、执行器都只用正式名，避免"旧名绑到静态默认资产"
+     * 这种只在旧客户端才会踩到的坑。 */
+    const call = normalizeToolCall(rawToolName, args);
+    const toolName = call.name;
+    args = call.args;
 
     const isWrite = toolIsWrite(toolName);
 
@@ -236,9 +299,31 @@ export function makeToolExecutor(
       const needsCredential = derived?.entry.needsCredential ?? staticSpec.needsCredential;
       if (needsCredential) await requireCredential(assetId, identity);
 
-      /* 派生工具统一走 agent-tools；遗留名（pg_sql_query/kb_search/code_search）映射到同名实现。 */
+      /* 派生工具统一走 agent-tools；旧名已在上面的 normalizeToolCall 归一，
+       * 演示轨迹遗留名（pg_sql_query）仍由登记表兜底。
+       *
+       * subagent 注入：只有这一层同时拿得到「网关」与「只读子面」，
+       * 所以子代理的构造留在这里，agent-tools 只负责参数校验与结果包装。 */
       const outcome = await executeAgentTool(toolName, args, derived, {
         assetId, workspaceId, conversationId, identity,
+        subagent: async ({ goal, maxToolCalls }) => {
+          const childTools = face.active
+            .filter((item) => !toolIsWrite(item.name) && !SUBAGENT_DENY.has(item.name))
+            .map((item) => item.schema);
+          const allowed = new Set(childTools.map((item) => item.function.name));
+          return runSubagent({
+            goal, workspaceId, conversationId, tools: childTools, maxToolCalls,
+            executeTool: async (name, json) => {
+              /* 双保险：runSubagent 内部也判白名单，这里再判一次。
+               * 子面是"模型看不见"，白名单是"调不到"——后者不能依赖前者。 */
+              const canonical = normalizeToolCall(name, {}).name;
+              if (!allowed.has(canonical)) {
+                return { ok: false, result: `子代理不可使用 ${name}：只读子面为 ${[...allowed].join(' / ')}` };
+              }
+              return executor(name, json);
+            },
+          });
+        },
       });
       if (outcome.ok) {
         return {
@@ -257,6 +342,8 @@ export function makeToolExecutor(
       return { ok: false, result: `工具执行失败（未产生任何写操作）：${message}` };
     }
   };
+
+  return executor;
 }
 
 /** 工具卡状态：裁决结果 + 执行结果共同决定，不允许再出现"失败了还写已放行"。 */
@@ -460,7 +547,11 @@ export async function sendMessage(
 
         let parsedArgs: Record<string, unknown> = {};
         try { parsedArgs = JSON.parse(event.args) as Record<string, unknown>; } catch { /* 非 JSON 参数不阻断裁决 */ }
-        const targetPath = typeof parsedArgs.path === 'string' ? parsedArgs.path : undefined;
+        const targetPath = typeof parsedArgs.path === 'string'
+          ? parsedArgs.path
+          /* fs_manage 没有 path：用 from 作为被作用的路径，让内核的作用域/敏感规则
+           * 仍能对"要删/要移哪个文件"生效（留空等于放过这类判定）。 */
+          : (event.toolName === 'fs_manage' && typeof parsedArgs.from === 'string' ? parsedArgs.from : undefined);
 
         /* 1.0 不做会话级审批记忆：写工具一律由内核按 ask 裁决，逐次生成审批卡。
          * 会话免审的记忆键不含参数（设计 §6.4），对「写任意文件」这类动作等于长期免审。 */

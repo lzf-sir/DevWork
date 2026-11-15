@@ -19,6 +19,7 @@ import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
 @Component
 public class InventoryClient {
 
+  // HACK: RestTemplate 在这里当单例用，并发下要先确认线程安全性
   private final RestTemplate restTemplate = new RestTemplate();
   private final String url = "http://inventory-service/api/stock";
 
@@ -26,6 +27,7 @@ public class InventoryClient {
     HttpComponentsClientHttpRequestFactory f =
         new HttpComponentsClientHttpRequestFactory();
     f.setConnectTimeout(800);
+    // TODO: 超时目前写死在这里，应该走配置中心
     f.setReadTimeout(2000);
     restTemplate.setRequestFactory(f);
     return restTemplate.postForObject(url, req, InventoryResp.class);
@@ -37,7 +39,8 @@ public class InventoryClient {
 }
 `;
 
-const ORDER_SERVICE = `package com.example.order;
+const ORDER_SERVICE = `// TODO: 这个包还没有统一异常映射，repository 的异常会直接冒到 controller
+package com.example.order;
 
 import org.springframework.stereotype.Service;
 
@@ -70,6 +73,7 @@ public class OrderController {
     this.service = service;
   }
 
+  // FIXME: 这个接口没有分页，订单量上来会拖垮数据库
   @GetMapping("/{id}")
   public Order get(@PathVariable long id) {
     return service.findById(id);

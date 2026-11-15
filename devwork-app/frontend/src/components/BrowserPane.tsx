@@ -2,7 +2,7 @@
  * 内置浏览器（右栏工作台 · 浏览器 Tab）。
  *
  * 这一块要成立，Agent 必须**真的能开网页**，而不是文案上写着"支持浏览器"。所以链路是双向的：
- *   写：Agent 调 browser_navigate → 服务端写会话浏览器状态 → 本面板轮询到 → 跳转；
+ *   写：Agent 调 browser(mode=navigate) → 服务端写会话浏览器状态 → 本面板轮询到 → 跳转；
  *   读：面板把当前页标题与正文回传服务端 → Agent 的 browser_read_page 读到。
  *
  * 桌面端用 <webview>（独立 Chromium 实例，跨域页面也能正常渲染，还能执行脚本取正文）；
@@ -304,7 +304,7 @@ export default function BrowserPane(): React.ReactElement {
         {!url ? (
           <div className="brp-empty">
             <span>输入一个网址开始</span>
-            <span className="brp-empty-sub">Agent 也能导航这个浏览器（browser_navigate）</span>
+            <span className="brp-empty-sub">Agent 也能导航这个浏览器（browser mode=navigate）</span>
           </div>
         ) : null}
       </div>

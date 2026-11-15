@@ -9,8 +9,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { resolveRepoRoot } from './workspace-repos';
-import { SENSITIVE_RULES } from '../config/rules';
 import { all, get, run, newId } from '../db/database';
+/* 敏感规则必须与文件树同源：设置页改完规则，索引器不跟着变的话，
+ * 「不索引 .env」的承诺就只兑现了一半——界面上看不见，索引里却躺在库里。 */
+import { isSensitive } from '../db/repositories';
 import { DEFAULT_WORKSPACE_ID } from '../config';
 
 const CHUNK_MAX_LINES = 40;
@@ -50,17 +52,10 @@ function ftsAvailable(): boolean {
   }
 }
 
-/** 命中 12 条敏感文件规则或 .git 目录的文件不进索引。 */
-function isSensitive(rel: string): boolean {
+/** `.git` 永远跳过（版本库内部文件既不该进索引，也不该进上下文）。 */
+function isVcsInternal(rel: string): boolean {
   const normalized = rel.replace(/\\/g, '/').toLowerCase();
-  if (normalized.includes('.git/') || normalized === '.git') return true;
-  return SENSITIVE_RULES.some((rule) => {
-    const pattern = rule.pattern.toLowerCase();
-    if (pattern.endsWith('/')) return normalized.startsWith(pattern) || normalized.includes(`/${pattern}`);
-    if (pattern.startsWith('*')) return normalized.endsWith(pattern.slice(1));
-    if (pattern.startsWith('.env')) return path.basename(normalized) === pattern || path.basename(normalized).startsWith(pattern);
-    return normalized === pattern || normalized.endsWith(`/${pattern}`) || path.basename(normalized) === pattern;
-  });
+  return normalized.includes('.git/') || normalized === '.git';
 }
 
 /** 从文件内容里提取主声明符号（class / interface / function / 顶层标题）。 */
@@ -110,6 +105,7 @@ function walkFiles(dir: string, base: string, out: string[] = [], accept?: (rel:
       return;
     }
     if (!entry.isFile()) return;
+    if (isVcsInternal(rel)) return;
     if (isSensitive(rel)) return;
     if (!TEXT_EXT.has(path.extname(entry.name).toLowerCase())) return;
     if (accept && !accept(rel)) return;
@@ -126,6 +122,26 @@ function clearAsset(assetId: string): number {
     run('DELETE FROM index_fts WHERE chunk_id = ?', id);
   }
   return oldIds.length;
+}
+
+/**
+ * 按**当前生效规则**清掉已索引的敏感块（跨全部资产）。
+ *
+ * 为什么非做不可：`isSensitive` 只在建索引那一刻过滤。规则收紧之后，旧块已经躺在
+ * `index_chunk` 里，`searchIndex` 照样搜得到、上下文照样取得到——界面上写着
+ * 「已排除」，库里数据还在。这种不一致没人会去翻库验证，所以只能在这里主动清。
+ *
+ * 反方向（放宽规则）不补建索引：那是「还没索引」而不是「索引了不该索引的」，
+ * 让用户自己决定要不要重建，比偷偷跑一遍整仓扫描好。
+ */
+export function purgeSensitiveChunks(): { chunks: number; files: number } {
+  const rows = all<{ id: string; path: string }>('SELECT id, path FROM index_chunk');
+  const hits = rows.filter((row) => row.path !== '' && isSensitive(row.path));
+  for (const row of hits) {
+    run('DELETE FROM index_fts WHERE chunk_id = ?', row.id);
+    run('DELETE FROM index_chunk WHERE id = ?', row.id);
+  }
+  return { chunks: hits.length, files: new Set(hits.map((row) => row.path)).size };
 }
 
 /** 单文件写块；返回写入的块数。 */
@@ -232,6 +248,40 @@ export interface SearchHit {
   endLine: number;
   kind: 'code' | 'doc';
   score: number;
+  /** 命中那一行的原文（截断）。没有它，结果列表只能给出「文件 + 行号」，
+   *  用户得逐个点进去才能确认是不是自己要找的那处。 */
+  snippet: string;
+  /** snippet 的**绝对行号**（startLine + 块内偏移）—— 跳转要落在命中行，不是块首行。 */
+  snippetLine: number;
+}
+
+/** 片段最长多少个字符：够看清一行上下文，又不至于把面板撑成两行。 */
+const SNIPPET_MAX = 160;
+
+/**
+ * 从块内容里找第一处命中行。
+ *
+ * 优先回「含关键词的那一行」，因为块是 40 行的窗口，块首行往往离命中处很远；
+ * 一行都没命中（例如只命中 symbol，或者关键词横跨行）时才退回首个非空行——
+ * 那种情况下给块首行比给空片段诚实：至少它确实是这个块里的内容。
+ */
+function snippetOf(content: string, startLine: number, terms: string[]): { snippet: string; snippetLine: number } {
+  const lines = content.split('\n');
+  const lowered = terms.map((term) => term.toLowerCase()).filter(Boolean);
+  const trim = (value: string): string => {
+    const text = value.replace(/\r$/, '').trimEnd();
+    return text.length > SNIPPET_MAX ? `${text.slice(0, SNIPPET_MAX)}…` : text;
+  };
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].toLowerCase();
+    if (lowered.some((term) => line.includes(term))) {
+      return { snippet: trim(lines[index]), snippetLine: startLine + index };
+    }
+  }
+  const firstNonEmpty = lines.findIndex((line) => line.trim() !== '');
+  return firstNonEmpty >= 0
+    ? { snippet: trim(lines[firstNonEmpty]), snippetLine: startLine + firstNonEmpty }
+    : { snippet: '', snippetLine: startLine };
 }
 
 /** 统一生成 locator：文档给出行区间（与设计 §2.4 的 `docs/ops/metrics.md:40-42` 一致），
@@ -240,11 +290,12 @@ function locatorOf(path: string, startLine: number, endLine: number, kind: strin
   return kind === 'doc' ? `${path}:${startLine}-${endLine}` : `${path}:${startLine}`;
 }
 
-function hitOf(row: Row): SearchHit {
+function hitOf(row: Row, terms: string[]): SearchHit {
   const kind = str(row.kind) === 'doc' ? 'doc' : 'code';
   const startLine = Number(row.start_line);
   const endLine = Number(row.end_line);
   const filePath = str(row.path);
+  const { snippet, snippetLine } = snippetOf(str(row.content), startLine, terms);
   return {
     id: str(row.id),
     title: str(row.symbol) || filePath,
@@ -254,6 +305,8 @@ function hitOf(row: Row): SearchHit {
     endLine,
     kind,
     score: Number(row.score),
+    snippet,
+    snippetLine,
   };
 }
 
@@ -273,18 +326,18 @@ export function searchAsset(assetId: string, query: string): SearchHit[] {
   const likeClause = terms.map(() => '(content LIKE ? OR symbol LIKE ?)').join(' OR ');
   const likeParams = terms.flatMap((term) => [`%${term}%`, `%${term}%`]);
   const likeHits: SearchHit[] = (all<Row>(
-    `SELECT id, symbol, path, start_line, end_line, kind, score FROM index_chunk
+    `SELECT id, symbol, path, start_line, end_line, kind, score, content FROM index_chunk
      WHERE asset_id = ? AND (${likeClause})
      ORDER BY score DESC LIMIT 10`,
     assetId, ...likeParams,
-  )).map(hitOf);
+  )).map((row) => hitOf(row, terms));
 
   if (!ftsAvailable()) return likeHits;
 
   let ftsHits: SearchHit[] = [];
   try {
     const rows = all<Row>(
-      `SELECT c.id, c.symbol, c.path, c.start_line, c.end_line, c.kind, f.rank AS rank
+      `SELECT c.id, c.symbol, c.path, c.start_line, c.end_line, c.kind, c.content, f.rank AS rank
        FROM index_fts f JOIN index_chunk c ON c.id = f.chunk_id
        WHERE index_fts MATCH ? AND c.asset_id = ?
        ORDER BY rank LIMIT 10`,
@@ -292,7 +345,7 @@ export function searchAsset(assetId: string, query: string): SearchHit[] {
     );
     /* FTS5 rank ≤ 0 且越小越相关；归一成 0~0.98 的分数。 */
     ftsHits = rows.map((row) => ({
-      ...hitOf(row),
+      ...hitOf(row, terms),
       score: Number((1 / (1 + Math.abs(Number(row.rank ?? 1)))).toFixed(2)),
     }));
   } catch {

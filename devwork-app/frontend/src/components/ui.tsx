@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useStore } from '../store';
 import { api } from '../api/client';
 import type { CapItem } from '../api/client';
+import SensitiveRulesEditor from './SensitiveRulesEditor';
 import {
   ArrowIcon,
   ChartIcon,
@@ -432,6 +433,10 @@ export function ModalHost(): React.ReactElement {
         </button>
       </>,
     );
+  } else if (modal.kind === 'rules') {
+    /* 编辑器自带按钮区（保存要看草稿是否合法），所以这里不给 footer。
+     * onSaved 只回传条数：调用方（设置页）用它刷新摘要，不关心具体规则内容。 */
+    body = <SensitiveRulesEditor onClose={close} onSaved={(rules) => modal.onSaved?.(rules.length)} />;
   } else if (modal.kind === 'files') {
     body = (
       <div className="mfiles">
@@ -460,7 +465,7 @@ export function ModalHost(): React.ReactElement {
     <div className="ovl" onMouseDown={(event) => {
       if (event.target === event.currentTarget) close();
     }}>
-      <div className="modal" onMouseDown={(event) => event.stopPropagation()}>
+      <div className={`modal${modal.kind === 'rules' ? ' modal-rules' : ''}`} onMouseDown={(event) => event.stopPropagation()}>
         <h3>{modal.title}</h3>
         {body}
         {foot}

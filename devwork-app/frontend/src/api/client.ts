@@ -136,6 +136,7 @@ import type {
   ConversationInput,
   Credential,
   CredentialBindInput,
+  CredentialRenewInput,
   Dict,
   EffectivePolicy,
   ExecResult,
@@ -145,6 +146,8 @@ import type {
   FileNode,
   FileOutline,
   FileDiff,
+  FileRefsResult,
+  FileTodosResult,
   LlmKeyStatus,
   LlmKeySetResult,
   LlmConfig,
@@ -171,6 +174,7 @@ import type {
   SearchHit,
   SendMessageInput,
   SensitiveRule,
+  SensitiveRuleUpdate,
   Settings,
   SettingsSection,
   Sidebar,
@@ -408,7 +412,8 @@ export const api: ApiClient = {
   getCredential: (assetId: string) => request<Credential>('GET', `/assets/${enc(assetId)}/credential`),
   bindCredential: (assetId: string, input: CredentialBindInput) =>
     request<Credential>('POST', `/assets/${enc(assetId)}/credential/bind`, input),
-  renewCredential: (assetId: string) => request<Credential>('POST', `/assets/${enc(assetId)}/credential/renew`),
+  renewCredential: (assetId: string, input: CredentialRenewInput) =>
+    request<Credential>('POST', `/assets/${enc(assetId)}/credential/renew`, input),
   revokeCredential: (assetId: string) => request<Credential>('POST', `/assets/${enc(assetId)}/credential/revoke`),
 
   /* ---- 会话 / 消息 / 引用 ---- */
@@ -509,7 +514,7 @@ export const api: ApiClient = {
     request<{ url: string; fileName: string; sizeBytes: number }>('GET', `/artifacts/${enc(artifactId)}/download`),
   /* 产物预览（右栏「文件」Tab）：文本给内容、图片给 URL、二进制只给元信息。 */
   getArtifactPreview: (artifactId: string) => request<ArtifactPreview>('GET', `/artifacts/${enc(artifactId)}/preview`),
-  /* 内置浏览器状态（会话级）：Agent 的 browser_navigate 写这里，前端轮询后跳转。 */
+  /* 内置浏览器状态（会话级）：Agent 的 browser(mode=navigate) 写这里，前端轮询后跳转。 */
   getBrowserState: (conversationId: string) => request<BrowserState>('GET', `/conversations/${enc(conversationId)}/browser`),
   setBrowserState: (conversationId: string, url: string) =>
     request<BrowserState>('POST', `/conversations/${enc(conversationId)}/browser`, { url }),
@@ -576,6 +581,22 @@ export const api: ApiClient = {
     request<FileOutline>('GET', `/assets/${enc(assetId)}/files/outline${qs({ path })}`, undefined, { timeoutMs: 20000 }),
   getFileDiff: (assetId: string, path: string) =>
     request<FileDiff>('GET', `/assets/${enc(assetId)}/files/diff${qs({ path })}`),
+  /** 符号级引用：整仓同步扫描（有界），比 outline 里的文件级粗扫慢，所以超时给到 30s。 */
+  getFileRefs: (assetId: string, symbol: string, max?: number) =>
+    request<FileRefsResult>(
+      'GET',
+      `/assets/${enc(assetId)}/files/refs${qs({ symbol, max: max ?? 40 })}`,
+      undefined,
+      { timeoutMs: 30000 },
+    ),
+  /* 遗留标记：整仓遍历 + 逐文件读，同 refs 一样放宽超时（都是「点一次付一次」）。 */
+  getFileTodos: (assetId: string, subPath?: string) =>
+    request<FileTodosResult>(
+      'GET',
+      `/assets/${enc(assetId)}/files/todos${qs({ subPath })}`,
+      undefined,
+      { timeoutMs: 30000 },
+    ),
   saveFile: (assetId: string, input: SaveFileInput) =>
     request<SaveFileResult>('POST', `/assets/${enc(assetId)}/files/save`, input),
   requestAgentWrite: (assetId: string, input: AgentWriteInput) =>
@@ -593,7 +614,7 @@ export const api: ApiClient = {
   ensureWorkspaceDir: (workspaceId: string) =>
     request<{ workspaceId: string; localRoot: string }>('POST', `/workspaces/${enc(workspaceId)}/local-dir`, {}),
   getSensitiveRules: () => request<SensitiveRule[]>('GET', '/sensitive-rules'),
-  updateSensitiveRules: (rules: SensitiveRule[]) => request<SensitiveRule[]>('PUT', '/sensitive-rules', { rules }),
+  updateSensitiveRules: (rules: SensitiveRule[]) => request<SensitiveRuleUpdate>('PUT', '/sensitive-rules', { rules }),
 
   /* ---- 设置 ---- */
   getSettings: () => request<Settings>('GET', '/settings'),

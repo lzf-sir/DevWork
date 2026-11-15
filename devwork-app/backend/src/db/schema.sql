@@ -441,3 +441,13 @@ CREATE TABLE IF NOT EXISTS browser_state (
   page_text TEXT NOT NULL DEFAULT '',
   page_captured_at TEXT NOT NULL DEFAULT ''
 );
+
+/* 会话笔记（memo 工具）：Agent 自己写的"已确认事实"，用来跨上下文压缩存活。
+   与 todo 的分工：todo 记"排到第几步"，memo 记"哪些结论不用再查一遍"。
+   正文不设外键级联（历史库可能缺 conversation 行），按 conversation_id 直查。 */
+CREATE TABLE IF NOT EXISTS conversation_memo (
+  conversation_id TEXT PRIMARY KEY,
+  content TEXT NOT NULL DEFAULT '',
+  revision INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL DEFAULT ''
+);

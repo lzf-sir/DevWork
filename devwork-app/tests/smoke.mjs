@@ -312,6 +312,67 @@ async function main() {
     check('F', '文件树不含敏感文件', '敏感路径 0 条',
       `共 ${paths.length} 条，敏感=${JSON.stringify(leaked)}`, leaked.length === 0);
   }
+  /* 引用有两套口径，很容易被"顺手统一"成一套——那会让两个面板数字互相矛盾。
+   * 这里把两者的边界钉住：outline 是文件级粗扫（必须自报粗扫），refs 是符号级精确。 */
+  {
+    const r = await call('GET', '/assets/a-order-service/files/outline?path=src/main/java/order/OrderService.java');
+    const first = String(dataOf(r)?.references?.[0] ?? '');
+    check('F', 'outline 的引用自报「文件级粗扫」', 'HTTP 200 且含「粗扫」字样',
+      `HTTP ${r.status}, references[0]=${first}`, r.status === 200 && first.includes('粗扫'));
+  }
+  {
+    const r = await call('GET', '/assets/a-order-service/files/refs?symbol=Order.Service');
+    check('F', 'refs 拒绝非标识符', 'HTTP 400 + E_VALIDATION',
+      `HTTP ${r.status}, code=${codeOf(r)}`, r.status === 400 && codeOf(r) === 'E_VALIDATION');
+  }
+  {
+    /* OrderService 定义在 OrderService.java，被 OrderController.java 引用；
+     * 两者同包（com.example.order），Java 同包无需 import → 收敛必须落在 unknown，
+     * 且 sameDir 指向定义文件。这一条正是"不能凭 import 判归属"的现场证据。 */
+    const r = await call('GET', '/assets/a-order-service/files/refs?symbol=OrderService');
+    const d = dataOf(r);
+    const defs = Array.isArray(d?.hits) ? d.hits.filter((h) => h.kind === 'definition') : [];
+    const groups = Array.isArray(d?.convergence?.files) ? d.convergence.files : [];
+    const samePkg = groups.find((g) => g.kind === 'unknown' && String(g.sameDir ?? '').endsWith('OrderService.java'));
+    check('F', 'refs 返回符号级命中与收敛表', 'HTTP 200 且含定义 + 跨文件分组',
+      `HTTP ${r.status}, hits=${d?.hits?.length}, defs=${defs.length}, files=${d?.convergence?.definitionFiles?.length}`,
+      r.status === 200 && defs.length >= 1 && (d?.convergence?.definitionFiles?.length ?? 0) >= 1);
+    check('F', 'refs 对 Java 同包给出「无法归属 + 同目录定义」', '存在 unknown 分组且 sameDir 非空',
+      `groups=${JSON.stringify(groups.map((g) => [g.path, g.kind, g.sameDir]))}`, Boolean(samePkg));
+  }
+  /* 遗留标记：三个"为什么可能没扫全"的原因必须是三个独立字段。
+   * 合并成一个 truncated 之后，界面就分不清"命中到顶后面没读"和"有整份文件没看"，
+   * 只能说一句模糊的"结果可能不完整"——那等于什么都没说。 */
+  {
+    const r = await call('GET', '/assets/a-order-service/files/todos');
+    const d = dataOf(r);
+    const facts = ['stoppedAtCap', 'walkTruncated', 'skippedLarge'].filter((k) => d?.[k] !== undefined);
+    check('F', '遗留标记把三种扫描缺口拆开报', '三字段齐全且没有合并成 truncated',
+      `HTTP ${r.status}, 字段=${JSON.stringify(facts)}, truncated=${String(d?.truncated)}`,
+      r.status === 200 && facts.length === 3 && d?.truncated === undefined);
+  }
+  {
+    /* 触顶这条分支在演示仓库（4 条标记）里永远走不到：如果 flag 从不置真，
+     * 界面上的「已列 / 未覆盖」就是死代码——死代码里的措辞没人验证过。
+     * 用 max=1 逼它置真，证明这条通道是活的。 */
+    const r = await call('GET', '/assets/a-order-service/files/todos?max=1');
+    const d = dataOf(r);
+    check('F', '遗留标记命中触顶时 stoppedAtCap 置真', 'max=1 → hits 1 且 stoppedAtCap=true',
+      `HTTP ${r.status}, hits=${d?.hits?.length}, stoppedAtCap=${String(d?.stoppedAtCap)}, walkTruncated=${String(d?.walkTruncated)}`,
+      r.status === 200 && d?.hits?.length === 1 && d?.stoppedAtCap === true);
+  }
+  {
+    /* 演示仓库里刻意放了三种位置的标记：方法内 / 类内 / 文件头。
+     * owner 的 undefined 有两种含义，只有 codeFile 能分开——这里把三种归属都钉住。 */
+    const r = await call('GET', '/assets/a-order-service/files/todos');
+    const hits = dataOf(r)?.hits ?? [];
+    const inMethod = hits.find((h) => String(h.owner ?? '').includes('.'));
+    const inClass = hits.find((h) => h.owner === 'OrderController');
+    const moduleLevel = hits.find((h) => h.owner === undefined && h.codeFile === true);
+    check('F', '遗留标记带所属符号（方法内 / 类内 / 模块级）', '三类归属各至少 1 条',
+      `hits=${JSON.stringify(hits.map((h) => [String(h.path).split('/').pop(), h.line, h.marker, h.owner]))}`,
+      Boolean(inMethod) && Boolean(inClass) && Boolean(moduleLevel));
+  }
 
   /* ------------------------------------------------------------------ */
   section('G. 终端会话上限（设计文档 2027 行：最多 5 个）');
@@ -498,6 +559,45 @@ async function main() {
         && dataOf(r)?.diskChanged === true && onDisk === content && !!dataOf(r)?.auditId);
     cleanup.push(() => { try { fs.rmSync(file); } catch { /* noop */ } });
   }
+  {
+    /* `diskChanged` 承诺的是「磁盘上的字节变没变」。同内容再存一次必须是 false——
+     * 这条防的是有人"顺手"把它改回恒 true：那界面就永远分不清「改了」和「只是点了下保存」，
+     * 过期标记只能一律误报，误报到用户不再相信那个提示。 */
+    const rel = 'qa-smoke-unchanged.txt';
+    const content = 'QA unchanged probe\n';
+    const first = await call('POST', '/assets/a-order-service/files/save', { path: rel, content });
+    const second = await call('POST', '/assets/a-order-service/files/save', { path: rel, content });
+    check('K', '同内容再保存一次 → diskChanged=false', '新建时 true，第二次 false',
+      `first=${dataOf(first)?.diskChanged}, second=${dataOf(second)?.diskChanged}`,
+      first.status === 200 && dataOf(first)?.diskChanged === true
+        && second.status === 200 && dataOf(second)?.diskChanged === false);
+    cleanup.push(() => { try { fs.rmSync(path.join(REPO_ROOT, rel)); } catch { /* noop */ } });
+  }
+  {
+    /* 往返守恒：把服务端自己给出的原文原样提交回去，磁盘必须一个字节都不变。
+     *
+     * 这条防的是「保存顺手美化」那类实现——改行尾、吃掉末尾换行、把空行写成空格。
+     * 最典型的一次就是这样：`highlight()` 用 `&nbsp;` 撑空行，编辑区的 innerText
+     * 读出来是 U+00A0，于是**打开文件点保存**就把每条空行改写成空格（916→922 字节），
+     * 用户什么都没做却拿到一份看不懂的 diff。后端这条能挡住"服务端参与改写"，
+     * 前端那条由 test:save:visual 挡。 */
+    const rel = 'src/main/java/order/InventoryClient.java';
+    const abs = path.join(REPO_ROOT, rel);
+    const original = fs.readFileSync(abs);
+    const read = await call('GET', `/assets/a-order-service/files/content?path=${encodeURIComponent(rel)}`);
+    const plain = String(dataOf(read)?.plain ?? '');
+    const saved = await call('POST', '/assets/a-order-service/files/save', { path: rel, content: plain });
+    const after = fs.readFileSync(abs);
+    check('K', '原样保存不改写字节（往返守恒）',
+      'sha256 不变 + diskChanged=false + 空行数不变 + 末尾换行保留',
+      `sameBytes=${Buffer.compare(original, after) === 0}, diskChanged=${dataOf(saved)?.diskChanged}, `
+        + `blankBefore=${(plain.match(/\n\s*\n/g) ?? []).length}, blankAfter=${(after.toString('utf8').match(/\n\s*\n/g) ?? []).length}, `
+        + `tailNl=${after.toString('utf8').endsWith('\n')}`,
+      saved.status === 200
+        && Buffer.compare(original, after) === 0
+        && dataOf(saved)?.diskChanged === false
+        && plain.endsWith('\n') === after.toString('utf8').endsWith('\n'));
+  }
 
   /* ------------------------------------------------------------------ */
   section('L. V8：一次提问产出完整轨迹并落库');
@@ -548,6 +648,42 @@ async function main() {
     check('M', '知识库检索不被数据库凭据挡死', 'kb_search 行不含「需绑定凭据」',
       `status=${kbRow?.payload?.status}, result=${short(kbResult, 120)}`,
       !!kbRow && !kbResult.includes('\u9700\u7ed1\u5b9a\u51ed\u636e'));
+  }
+  /* 凭据的五态与两个动作。用 a-order-db-dev（本来就是 active），
+   * 不动 a-order-db-prod —— 上面的断言刚把它钉成 unbound。 */
+  {
+    const initial = await call('GET', '/assets/a-order-db-dev/credential');
+    check('M', '已绑定资产读出真实凭据状态（不是前端的布尔）', 'state=active 且 label 非空',
+      `state=${dataOf(initial)?.state}, label=${short(String(dataOf(initial)?.label ?? ''), 40)}`,
+      dataOf(initial)?.state === 'active' && String(dataOf(initial)?.label ?? '') !== '');
+
+    /* 轮换必须换秘密：只改标签等于假装轮换过。 */
+    const noSecret = await call('POST', '/assets/a-order-db-dev/credential/renew', { label: '只改标签' });
+    check('M', '轮换不带新秘密被拒', 'HTTP 400 + E_VALIDATION',
+      `HTTP ${noSecret.status}, code=${codeOf(noSecret)}`,
+      noSecret.status === 400 && codeOf(noSecret) === 'E_VALIDATION');
+
+    const renewed = await call('POST', '/assets/a-order-db-dev/credential/renew', { secret: 'smoke-rotated-secret' });
+    check('M', '轮换带新秘密后回到 active', 'state=active 且返回 secretMode',
+      `state=${dataOf(renewed)?.state}, mode=${dataOf(renewed)?.secretMode}`,
+      dataOf(renewed)?.state === 'active' && dataOf(renewed)?.secretMode !== undefined);
+
+    const revoked = await call('POST', '/assets/a-order-db-dev/credential/revoke');
+    check('M', '吊销后状态为 revoked 且如实回报密文删除结果', 'state=revoked + secretRemoved 字段',
+      `state=${dataOf(revoked)?.state}, removed=${dataOf(revoked)?.secretRemoved}`,
+      dataOf(revoked)?.state === 'revoked' && dataOf(revoked)?.secretRemoved !== undefined);
+
+    /* 「已吊销」与「未绑定」在库里都是 credential_bound=0，但资产侧要能看出
+     * 是"配过又被收回"，而不是"从来没配过"。 */
+    const afterRevoke = await call('GET', '/assets/a-order-db-dev/credential');
+    check('M', '吊销后的凭据状态仍是 revoked（不是退回 unbound）', 'state=revoked',
+      `state=${dataOf(afterRevoke)?.state}`, dataOf(afterRevoke)?.state === 'revoked');
+
+    /* 恢复：重新绑定，避免影响后续段对 db 资产的用法。 */
+    const rebound = await call('POST', '/assets/a-order-db-dev/credential/bind', { label: 'order_db · 只读凭据', secret: 'smoke-restore' });
+    check('M', '吊销后可重新绑定恢复访问', 'state=active',
+      `HTTP ${rebound.status}, state=${dataOf(rebound)?.state}`,
+      rebound.status === 200 && dataOf(rebound)?.state === 'active');
   }
   /* ------------------------------------------------------------------ */
   /* ------------------------------------------------------------------ */
@@ -637,6 +773,24 @@ async function main() {
     check('O', '知识库命中带可点开的定位', '含 path + startLine 且行号在文件范围内',
       `hits=${(dataOf(hits) ?? []).length}, located=${located.length}, locator=${first?.locator ?? '—'}, 行号有效=${lineInRange}`,
       located.length > 0 && lineInRange);
+
+    /* 10) 代码检索命中要带「命中行原文 + 绝对行号」。
+     * 只给文件与块首行的话，结果列表就是一张需要逐个点开验证的清单；
+     * 而 snippet 与 snippetLine 各自对得上、彼此对不上（片段取 A 行、行号报 B 行）
+     * 是这类接口最典型的假一致，所以这里逐条**读盘比对**那一行。 */
+    const codeHits = await call('GET', '/assets/a-order-service/search?q=OrderService');
+    const codeRows = dataOf(codeHits) ?? [];
+    const withSnip = codeRows.filter((h) => typeof h.snippet === 'string' && h.snippet !== '');
+    const snipMatchesDisk = withSnip.every((h) => {
+      const abs = path.join(REPO_ROOT, String(h.path));
+      if (!fs.existsSync(abs)) return false;
+      const line = (fs.readFileSync(abs, 'utf8').split(/\r?\n/)[Number(h.snippetLine) - 1] ?? '').trimEnd();
+      const shown = String(h.snippet);
+      return line === shown || (shown.endsWith('…') && line.startsWith(shown.slice(0, -1)));
+    });
+    check('O', '代码检索命中带命中行的原文与真实行号', 'snippet 与 snippetLine 同时对齐磁盘',
+      `hits=${codeRows.length}, 有片段=${withSnip.length}, 首条行号=${withSnip[0]?.snippetLine ?? '—'}, 与磁盘一致=${snipMatchesDisk}`,
+      codeRows.length > 0 && withSnip.length === codeRows.length && snipMatchesDisk);
   }
 
   /* ------------------------------------------------------------------ */
@@ -713,8 +867,8 @@ async function main() {
     const said2 = await call('POST', `/conversations/${encodeURIComponent(conv2Id)}/messages`, {
       content: '你好，请介绍一下你能做什么',
     });
-    const codeRow = (dataOf(said2)?.messages ?? []).find((m) => (m.payload ?? {}).toolName === 'code_search');
-    check('P', '撤销能力后工具被拦截', 'code_search 行状态=已拦截 / kind=suggestion',
+    const codeRow = (dataOf(said2)?.messages ?? []).find((m) => (m.payload ?? {}).toolName === 'code_find');
+    check('P', '撤销能力后工具被拦截', 'code_find 行状态=已拦截 / kind=suggestion',
       `kind=${codeRow?.kind}, status=${codeRow?.payload?.status}, reason=${short(String(codeRow?.payload?.reason ?? ''), 40)}`,
       codeRow?.kind === 'suggestion' && codeRow?.payload?.status === '\u5df2\u62e6\u622a');
     await call('PATCH', '/assets/a-order-service/capabilities/cap-a-order-service-0', { granted: true });
@@ -942,6 +1096,97 @@ async function main() {
     cleanup.push(async () => {
       await call('DELETE', `/conversations/${boundId}`);
     });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 敏感规则是可编辑的安全边界。这条链上任何一环断开，界面就会一边写着
+   * 「已排除」、一边让秘密躺在索引里 —— 而没有一个用户会去翻数据库验证。
+   *
+   * 本段会临时改全局规则，所以放在最后（Z 之前），结束时恢复原始规则并重建索引。 */
+  section('N. 敏感规则编辑（读生效值 / 拒空表 / 去重 / 索引跟随 / 存量清理）');
+  {
+    const putRules = (rules) => call('PUT', '/sensitive-rules', { rules });
+    const reindex = () => call('POST', '/assets/a-order-service/index/progress', { to: 100 });
+    const searchPaths = async (q) => {
+      const r = await call('GET', `/assets/a-order-service/search?q=${encodeURIComponent(q)}`);
+      const hits = Array.isArray(dataOf(r)) ? dataOf(r) : [];
+      return hits.map((hit) => String(hit.path));
+    };
+
+    const origin = await call('GET', '/sensitive-rules');
+    const originRules = Array.isArray(dataOf(origin)) ? dataOf(origin) : [];
+    check('N', '规则读端点给出生效值', 'HTTP 200 且至少 1 条',
+      `HTTP ${origin.status}, ${originRules.length} 条`, origin.status === 200 && originRules.length > 0);
+
+    /* 只留 *.pem 再读回：如果 GET 还在返回内置常量，读回会是 12 条；
+     * 如果 PUT 写错了地方，读回会是空的。两种都让这条断言红。 */
+    const narrowed = await putRules([{ id: 't1', pattern: '*.pem', description: '' }]);
+    const readBack = await call('GET', '/sensitive-rules');
+    const readBackRules = Array.isArray(dataOf(readBack)) ? dataOf(readBack) : [];
+    check('N', '保存后读回的就是刚存的那一份（GET 不读内置常量）',
+      '1 条且 pattern = *.pem',
+      `HTTP ${narrowed.status} · 读回 ${readBackRules.length} 条 ${JSON.stringify(readBackRules.map((r) => r.pattern))}`,
+      narrowed.status === 200 && readBackRules.length === 1 && readBackRules[0]?.pattern === '*.pem');
+
+    const empty = await putRules([]);
+    check('N', '拒绝清空规则表', 'HTTP 400 + E_VALIDATION',
+      `HTTP ${empty.status}, code=${codeOf(empty)}`,
+      empty.status === 400 && codeOf(empty) === 'E_VALIDATION');
+
+    const dup = await putRules([
+      { id: 'd1', pattern: '*.pem', description: '' },
+      { id: 'd2', pattern: '*.PEM', description: '' },
+    ]);
+    const dupRules = Array.isArray(dataOf(dup)?.rules) ? dataOf(dup).rules : [];
+    check('N', '重复规则按大小写不敏感去重', '2 条进 → 1 条出',
+      `${dupRules.length} 条 ${JSON.stringify(dupRules.map((r) => r.pattern))}`,
+      dup.status === 200 && dupRules.length === 1);
+
+    /* 规则放宽 → 索引必须跟着放宽。这条是「索引器读同一份规则」的证据：
+     * secrets/credentials.json 的扩展名是 .json，在建索引白名单里，
+     * 只要规则里没有 secrets/ 或 credentials，它就会被收进索引。
+     * 如果 indexer 还读内置常量，下面这条会红。 */
+    await putRules([{ id: 'w1', pattern: '*.pem', description: '' }]);
+    await reindex();
+    const loosePaths = await searchPaths('demo');
+    check('N', '规则放宽后索引器跟着放宽（credentials.json 进索引）',
+      '命中路径含 secrets/credentials.json',
+      JSON.stringify(loosePaths.slice(0, 5)),
+      loosePaths.some((p) => p.includes('credentials')));
+
+    /* 规则收紧 → 存量块必须一起消失。只靠「下次建索引时跳过」是不够的：
+     * 旧块还在库里，searchIndex 照样搜得到。 */
+    const tightened = await putRules([{ id: 't2', pattern: 'secrets/', description: '密钥目录' }]);
+    const purged = dataOf(tightened)?.purged ?? {};
+    check('N', '收紧规则时清掉存量索引块', 'purged.chunks > 0',
+      `HTTP ${tightened.status} · ${JSON.stringify(purged)}`,
+      tightened.status === 200 && Number(purged.chunks) > 0);
+
+    const tightPaths = await searchPaths('demo');
+    check('N', '清完之后被排除的文件搜不到', '命中里没有 credentials',
+      JSON.stringify(tightPaths.slice(0, 5)),
+      !tightPaths.some((p) => p.includes('credentials')));
+
+    /* 安全边界的变更必须留痕，且要能看出删了什么。 */
+    const audit = await call('GET', '/audit?action=setting.sensitive-rules.update&page=1&pageSize=40');
+    const rows = Array.isArray(dataOf(audit)?.items) ? dataOf(audit).items : [];
+    const ruleAudit = rows.filter((row) => String(row.action) === 'setting.sensitive-rules.update');
+    check('N', '改规则写入审计（含增删差异）', '存在 action=setting.sensitive-rules.update 且在 detail 里说明改动',
+      `命中 ${ruleAudit.length} 条 · ${String(ruleAudit[0]?.detail ?? '').slice(0, 80)}`,
+      ruleAudit.length > 0 && /删除|新增|未变化/.test(String(ruleAudit[0]?.detail ?? '')));
+
+    /* 恢复：原规则 + 重建索引。不恢复的话后面 Z 段收尾以及二次运行都会被污染。 */
+    const restoreBody = originRules.map((rule, index) => ({
+      id: String(rule.id ?? `o${index}`).slice(0, 32) || `o${index}`,
+      pattern: String(rule.pattern),
+      description: String(rule.description ?? ''),
+    }));
+    const restored = await putRules(restoreBody);
+    await reindex();
+    const restoredPaths = await searchPaths('demo');
+    check('N', '恢复原规则后索引重建回干净状态', 'credentials 不再命中',
+      `HTTP ${restored.status} · ${JSON.stringify(restoredPaths.slice(0, 5))}`,
+      restored.status === 200 && !restoredPaths.some((p) => p.includes('credentials')));
   }
 
   /* ------------------------------------------------------------------ */

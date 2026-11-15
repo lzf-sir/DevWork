@@ -66,12 +66,19 @@ function highlightLine(line: string, lang: string): string {
   return out.join('');
 }
 
-/** 多行文本 → 高亮 HTML（每行一个 div，与编辑器 gutter 对齐）。 */
+/**
+ * 多行文本 → 高亮 HTML（每行一个 div，与编辑器 gutter 对齐）。
+ *
+ * 空行必须渲染成 `<br>` 而不是 `&nbsp;`：这个 div 同时是 contentEditable 的编辑区，
+ * 保存走的是它的 `innerText`。`&nbsp;` 会被序列化成一个真实字符（U+00A0），
+ * 于是"打开文件 → 点保存"就会把每一条空行改写成"只有一个不可见字符的行"，
+ * 用户拿到一片莫名其妙的 diff。`<br>` 只撑起行高（不塌陷），`innerText` 仍是空行。
+ */
 export function highlight(plain: string, filePath: string): string {
   const lang = detect(filePath);
   return plain
     .split(/\r?\n/)
-    .map((line) => `<div>${highlightLine(line, lang) || '&nbsp;'}</div>`)
+    .map((line) => `<div>${highlightLine(line, lang) || '<br>'}</div>`)
     .join('');
 }
 
@@ -91,7 +98,7 @@ export function markAll(
   plain.split(/\r?\n/).forEach((line, lineIdx) => {
     const escaped = escapeHtml(line);
     if (!query || !needle) {
-      rows.push(`<div>${escaped || '&nbsp;'}</div>`);
+      rows.push(`<div>${escaped || '<br>'}</div>`);
       return;
     }
     const hay = escaped.toLowerCase();
@@ -110,7 +117,7 @@ export function markAll(
       at = hay.indexOf(needle, last);
     }
     parts.push(escaped.slice(last));
-    rows.push(`<div>${parts.join('') || '&nbsp;'}</div>`);
+    rows.push(`<div>${parts.join('') || '<br>'}</div>`);
   });
   return { html: rows.join(''), lineOf };
 }

@@ -27,6 +27,9 @@ function bundle(entry, outfile) {
       path.join(ROOT, entry),
       '--bundle',
       '--format=esm',
+      /* 服务端登记表会加载 skills/<id>/SKILL.md，用到 node:fs / node:path。
+       * 不打 node 平台的话 esbuild 会把内置模块当外部包解析失败。 */
+      '--platform=node',
       `--outfile=${outfile}`,
       '--log-level=warning',
     ],
@@ -49,12 +52,21 @@ const check = (name, ok, detail) => {
 const problems = server.validateSkillRegistry();
 check('服务端技能登记表自检通过', problems.length === 0, problems.join('；'));
 
-/* ② 两份清单逐字段一致。 */
+/* ② 内置技能与前端镜像逐字段一致。
+ *
+ * 为什么现在只比对内置项：技能从 v1.1 起分成两层——
+ *   · builtin（config/skills.ts）= 随代码发布，前端离线菜单靠镜像渲染，必须逐字一致；
+ *   · file（backend/src/skills/<id>/SKILL.md）= 团队扩展，天然不在镜像里。
+ * 把扩展项也算进"数量一致"会让每次加一个 SKILL.md 都要改前端，
+ * 那就等于把文件驱动又做回了 TS 数组。 */
 const registry = server.SKILL_REGISTRY;
 const mirror = client.MOCK_SKILLS;
-check('技能数量一致', registry.length === mirror.length, `server=${registry.length} client=${mirror.length}`);
+const builtin = registry.filter((skill) => (skill.source ?? 'builtin') === 'builtin');
+const fileSkills = registry.filter((skill) => skill.source === 'file');
 
-registry.forEach((skill, index) => {
+check('内置技能数量与前端镜像一致', builtin.length === mirror.length, `server=${builtin.length} client=${mirror.length}`);
+
+builtin.forEach((skill, index) => {
   const other = mirror[index];
   if (!other) {
     check(`技能 ${skill.id} 在前端镜像中存在`, false, '前端镜像缺少该项');
@@ -74,12 +86,52 @@ registry.forEach((skill, index) => {
   );
 });
 
-/* ③ 技能模板必须真的写得出方法论 —— 空模板没有意义。 */
+/* ③ 文件技能：必须有正文、必须有触发场景，且不能与内置撞名（撞名会让 skill_load 不确定）。 */
+check('文件技能已加载', fileSkills.length > 0, `file=${fileSkills.length}，技能目录=${server.SKILL_REGISTRY.length - builtin.length > 0 ? 'ok' : '空'}`);
+fileSkills.forEach((skill) => {
+  check(
+    `文件技能 ${skill.id} 结构完整（正文/触发场景/来源标注）`,
+    (skill.methodology ?? '').trim().length >= 40
+      && (skill.whenToUse ?? '').trim().length > 0
+      && !mirror.some((item) => item.id === skill.id),
+    { chars: (skill.methodology ?? '').length, when: skill.whenToUse },
+  );
+});
+
+/* ④ 技能模板必须真的写得出方法论 —— 空模板没有意义。 */
 check(
   '每个技能都有非空模板',
   registry.every((skill) => skill.template.trim().length > 10),
 );
 
-console.log(`\nTotal: ${registry.length + 2} | Failed: ${failed}`);
+/* ⑤ 「改前定位 → 改后验证」这条链路必须真的接上。
+ * 单篇正文各自写得好，不代表能串起来：上游多写一段、下游不认，链路就是断的。
+ * 这四条断言盯的是交接点（定位单 → 重放调用点），任何一端被删掉都会红。 */
+const nav = fileSkills.find((item) => item.id === 'code-navigator');
+const safety = fileSkills.find((item) => item.id === 'write-safety');
+check(
+  'code-navigator 产出可交接的定位单（含待改处与调用点）',
+  Boolean(nav) && nav.methodology.includes('定位单')
+    && nav.methodology.includes('待改处') && nav.methodology.includes('调用点'),
+  nav?.methodology.includes('定位单'),
+);
+check(
+  'write-safety 的改后验证要重放调用点，而不是只重读一遍',
+  Boolean(safety) && safety.methodology.includes('重放') && safety.methodology.includes('mode=refs'),
+  safety?.methodology.includes('重放'),
+);
+check(
+  'write-safety 明确区分「verify 通过」与「改对了」',
+  Boolean(safety) && safety.methodology.includes('verify') && safety.methodology.includes('不判断改动是否正确'),
+  safety?.methodology.includes('不判断改动是否正确'),
+);
+check(
+  'write-safety 列出写结果的四种形态（片段/空操作/超限/新建）',
+  Boolean(safety) && ['改动片段', '空操作', '超过片段上限', '新建文件']
+    .every((word) => safety.methodology.includes(word)),
+  safety?.methodology.includes('空操作'),
+);
+
+console.log(`\nTotal: ${builtin.length + fileSkills.length + 8} | Failed: ${failed}`);
 rmSync(OUT_DIR, { recursive: true, force: true });
 process.exit(failed === 0 ? 0 : 1);

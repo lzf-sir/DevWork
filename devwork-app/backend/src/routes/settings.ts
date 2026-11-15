@@ -30,6 +30,8 @@ import {
   panelShape,
   readOnlyMode,
   settingRaw,
+  sensitiveRuleDefs,
+  sensitivePatterns,
   sidebarShape,
   statusBarShape,
   workspaceById,
@@ -38,6 +40,8 @@ import {
 import { SENSITIVE_RULES } from '../config/rules';
 import { sanitizeAssetConfig } from '../config/asset-forms';
 import { detectDriver, hasWal } from '../db/adapter';
+/* 规则收紧后要立刻清掉已索引的敏感块，否则「已排除」只对文件树生效。 */
+import { purgeSensitiveChunks } from '../services/indexer';
 import { probe, kernelIdentity } from '../kernel/permission';
 import { executeCommand, listHistory, listSessions, ensureSession } from '../services/command-executor';
 import { runSqlQuery, toCsv } from '../services/sql-query';
@@ -322,15 +326,66 @@ export function registerSettingsRoutes(app: Express): void {
     });
     ok(res, result);
   }));
-  app.get('/api/sensitive-rules', (_req, res) => ok(res, SENSITIVE_RULES));
+  /* 规则编辑器的读端点必须读**生效值**，不能读内置常量。
+   * 之前这里直接返回 SENSITIVE_RULES：PUT 落库、isSensitive 也跟着库走，
+   * 唯独 GET 还给常量——改完刷新一下就变回原样，用户会以为保存失败，
+   * 再改一次就把自定义规则覆盖回常量。 */
+  app.get('/api/sensitive-rules', (_req, res) => ok(res, sensitiveRuleDefs()));
   app.put('/api/sensitive-rules', wrap(async (req: Request, res: Response) => {
-    /* 契约校验一次，块内统一用 payload：同一请求重复解析只是浪费。 */
+    const who = await identity(req);
     const payload = parseBody(sensitiveRulesSchema, req);
-    const rules = Array.isArray(payload.rules) ? (payload.rules as Row[]) : SENSITIVE_RULES;
+    const before = sensitivePatterns();
+
+    /* 规范化三件事：trim、丢空、大小写不敏感去重。
+     * 去重按小写是因为 Windows 文件系统大小写不敏感——`.ENV` 与 `.env` 指向同一个
+     * 文件，留着两条只会让「规则 12 条」这个数字虚高。 */
+    const seen = new Set<string>();
+    const patterns: string[] = [];
+    for (const rule of Array.isArray(payload.rules) ? payload.rules : []) {
+      const pattern = String(rule.pattern ?? '').trim();
+      if (pattern === '') continue;
+      const key = pattern.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      patterns.push(pattern);
+    }
+
+    /* 空表不是「没有规则」，而是「所有文件都放行」—— .env、id_rsa、*.pem 会同时
+     * 出现在文件树、索引和会话上下文里。这个后果没法用一句「已保存」糊过去。 */
+    if (patterns.length === 0) {
+      throw new ApiFailure('E_VALIDATION',
+        '至少保留 1 条规则：全部删除等于让 .env / 私钥重新出现在文件树、索引与会话上下文里。'
+        + '想放宽请把规则收窄到具体文件名，而不是清空整张表。');
+    }
+
     const privacy = await settingRaw('privacy');
-    privacy.sensitiveRules = rules.map((r) => String(r.pattern ?? ''));
+    privacy.sensitiveRules = patterns;
     run('UPDATE setting SET raw = ? WHERE section = ?', JSON.stringify(privacy), 'privacy');
-    ok(res, rules);
+    /* 写库之后立刻按新规则清库：收紧规则时，旧索引块必须一起消失，
+     * 否则「已排除」只兑现了文件树那一半，检索还能把 .env 搜出来。 */
+    const purged = purgeSensitiveChunks();
+
+    /* 规则的增删是安全边界变更，必须能回答「谁在什么时候删了哪一条」。
+     * 与其它写设置端点一致地落审计；删过规则时抬到 warn。 */
+    const lowered = (list: string[]): Set<string> => new Set(list.map((item) => item.toLowerCase()));
+    const beforeSet = lowered(before);
+    const afterSet = lowered(patterns);
+    const added = patterns.filter((pattern) => !beforeSet.has(pattern.toLowerCase()));
+    const removed = before.filter((pattern) => !afterSet.has(pattern.toLowerCase()));
+    const changes = [
+      added.length > 0 ? `新增 ${added.length} 条：${added.slice(0, 5).join('、')}${added.length > 5 ? ' …' : ''}` : '',
+      removed.length > 0 ? `删除 ${removed.length} 条：${removed.slice(0, 5).join('、')}${removed.length > 5 ? ' …' : ''}` : '',
+      purged.chunks > 0 ? `清理索引 ${purged.chunks} 块（${purged.files} 个文件）` : '',
+    ].filter(Boolean).join(' · ');
+    writeAudit({
+      workspaceId: AUDIT_GLOBAL_SCOPE, actor: who.name, source: 'user',
+      action: 'setting.sensitive-rules.update', target: `${before.length} 条 → ${patterns.length} 条`,
+      result: '已保存', severity: removed.length > 0 ? 'warn' : 'info',
+      detail: changes || '规则内容未变化（重新提交了同一份）',
+    });
+    /* 响应带上 purged：界面不能只说「已保存」——用户需要知道有多少存量索引被清掉了，
+     * 也需要知道「没清 = 本来就没有」，这两种 0 的含义不同。 */
+    ok(res, { rules: sensitiveRuleDefs(), purged });
   }));
 
   /* ---------------- G9 设置 ---------------- */

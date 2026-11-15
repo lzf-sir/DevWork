@@ -1,5 +1,5 @@
 /**
- * 测试辅助：让 Agent 真的导航内置浏览器（走真实的 browser_navigate 工具链）。
+ * 测试辅助：让 Agent 真的导航内置浏览器（走真实的 browser(mode=navigate) 工具链）。
  *
  * 用法：node_modules/.bin/tsx tests/browser-push.ts <conversationId> <url>
  * 与服务进程共享同一个 SQLite 库（WAL 模式支持并发读写）。
@@ -19,8 +19,8 @@ process.env.DEVWORK_BROWSER_ALLOW_PRIVATE = '1';
 initDatabase(() => undefined);
 
 const face = deriveToolFace('w-ops');
-const tool = face.all.find((item) => item.name === 'browser_navigate');
-const result = await executeAgentTool('browser_navigate', { url }, tool, {
+const tool = face.all.find((item) => item.name === 'browser');
+const result = await executeAgentTool('browser', { mode: 'navigate', url }, tool, {
   assetId: 'w-ops',
   workspaceId: 'w-ops',
   conversationId,

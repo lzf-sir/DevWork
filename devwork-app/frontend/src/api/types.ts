@@ -42,6 +42,14 @@ export interface Health {
    * 那是我们这一轮一直在修的那类"界面说谎"。
    */
   browserAllowPrivate?: boolean;
+  /**
+   * 外部检索后端（`DEVWORK_SEARCH_URL`）是否已接入。
+   *
+   * 同样声明为可选：没上报 = 不知道，界面必须说「未获取到状态」。
+   * 这里特别不能默认 `false` —— "未接入"会让用户以为能力缺失而去找配置，
+   * 而真相可能只是后端没回这个字段。
+   */
+  webSearch?: boolean;
 }
 
 export interface Bootstrap {
@@ -205,6 +213,10 @@ export interface SearchHit {
   endLine: number;
   kind: 'code' | 'doc';
   score: number;
+  /** 命中那一行的原文（服务端已截断）。列表要能「看一眼就知道是不是它」。 */
+  snippet: string;
+  /** snippet 的绝对行号：块是 40 行窗口，跳转必须落在命中行而不是块首行。 */
+  snippetLine: number;
 }
 
 export interface KbDocument {
@@ -232,6 +244,16 @@ export interface Credential {
   authMethod?: string;
   /** 资产侧的账号名（不是绑定人的名字）。 */
   username?: string;
+  /**
+   * 秘密的实际存储模式（仅 bind / renew 的响应带）。
+   *
+   * `none` 不是"没存"这么简单：它表示当前环境没有可用系统钥匙串，
+   * 秘密**根本没有落盘**，库里只有引用。界面必须说出来，
+   * 否则用户以为凭据存好了，重启后才发现查不了。
+   */
+  secretMode?: 'safeStorage' | 'none';
+  /** 吊销时本机密文是否真的被删除（false = 本来就没有或删除失败）。 */
+  secretRemoved?: boolean;
 }
 
 export interface CredentialBindInput {
@@ -242,6 +264,19 @@ export interface CredentialBindInput {
   /** 鉴权方式。 */
   method?: AuthMethod;
   /** 资产侧的账号名。 */
+  username?: string;
+}
+
+/**
+ * 轮换输入。
+ *
+ * `secret` 必填是**故意的**：轮换的语义是换掉秘密本身。只改标签、密文不动，
+ * 那是「假装轮换过」，比不做更危险——用户会以为旧口令已经失效。
+ */
+export interface CredentialRenewInput {
+  secret: string;
+  label?: string;
+  method?: AuthMethod;
   username?: string;
 }
 
@@ -462,7 +497,7 @@ export interface ArtifactPreview {
 /**
  * 内置浏览器的会话级状态。
  *
- * Agent 的 browser_navigate 工具把地址写进这里，前端浏览器 Tab 轮询后跳转 ——
+ * Agent 的 browser(mode=navigate) 工具把地址写进这里，前端浏览器 Tab 轮询后跳转 ——
  * 这条链路让「Agent 控制浏览器」是真的，而不是只在文案上写着。
  */
 export interface BrowserState {
@@ -662,6 +697,109 @@ export interface FileOutline {
 export interface FileDiff {
   diff: string;
   clean: boolean;
+  /** 未追踪（git 新增未 add）：diff 为空但**不是**没有改动，界面必须分开说。 */
+  untracked?: boolean;
+}
+
+/* ---- 符号级引用（/files/refs，界面「引」面板） ----
+ * 与 FileOutline.references 是两套口径，数字不一致是设计结果：
+ *   · FileOutline.references → 文件级粗扫（子串命中、含注释与字符串、不区分同名符号）；
+ *   · 下面这套 → 词法层符号级精确计数 + 按 import 的跨文件收敛。
+ * 界面上必须分开表述，不能让用户以为其中一个算错了。 */
+export type RefFileKind = 'local' | 'linked' | 'split' | 'unknown';
+
+export interface RefImportLink {
+  /** 命中的定义文件（仓库内相对路径）。 */
+  target: string;
+  /** 说明符原文。 */
+  specifier: string;
+  /** `name` = import 名单里就有这个符号；`module` = 只导入了定义所在模块。 */
+  via: 'name' | 'module';
+}
+
+export interface RefFileGroup {
+  path: string;
+  refs: number;
+  defs: number;
+  kind: RefFileKind;
+  links: RefImportLink[];
+  /** 只在 `unknown` 时有值：同目录下恰好有一个定义文件（不是归属，只是「下一个该看哪儿」）。 */
+  sameDir?: string;
+}
+
+export interface RefGroupStat {
+  label: string;
+  count: number;
+}
+
+export interface FileRefsResult {
+  hits: Array<{
+    path: string;
+    line: number;
+    column: number;
+    kind: 'definition' | 'reference';
+    snippet: string;
+    /** 引用处的前缀接收者（书写形式，不是类型）。 */
+    receiver?: string;
+    /** 该处所在的符号。 */
+    scope?: string;
+  }>;
+  filesScanned: number;
+  filesMatched: number;
+  /** 出现在注释/字符串里、已被排除的同名命中数（解释了为什么和 grep 数量不同）。 */
+  excludedInNonCode: number;
+  /** 命中数触顶或遍历被截断。 */
+  truncated: boolean;
+  skippedLarge: number;
+  summary: {
+    byReceiver: RefGroupStat[];
+    byScope: RefGroupStat[];
+    definitionScopes: RefGroupStat[];
+    hiddenGroups: number;
+    covered: number;
+  };
+  convergence: {
+    definitionFiles: Array<{ path: string; defs: number; line: number; scope?: string }>;
+    files: RefFileGroup[];
+    linkedRefs: number;
+    unknownRefs: number;
+    splitRefs: number;
+    localRefs: number;
+    hiddenFiles: number;
+    /** 解析时读过的 import 条数：为 0 时「全是无法归属」不能归因于符号本身。 */
+    importsParsed: number;
+  };
+}
+
+/* ---- 遗留标记（/files/todos，界面「遗留标记」） ----
+ * 与 code_todos 工具同一实现（scanTodos），所以「为什么可能没扫全」在这里也必须是
+ * 三个独立事实，而不是一个 truncated：命中的是三条互不替代的通道。 */
+export interface TodoHitShape {
+  path: string;
+  line: number;
+  /** TODO / FIXME / HACK 原文。 */
+  marker: string;
+  /** 标记后的说明（最多 120 字）；空串表示「有标记但没写内容」。 */
+  text: string;
+  /**
+   * 包含该行的最内层符号（`Class.method` / `fn`）。
+   * `undefined` 有两种含义，靠 `codeFile` 区分：代码文件里确实不在任何符号内（模块级），
+   * 或非代码文件根本没有符号这个概念。
+   */
+  owner?: string;
+  codeFile: boolean;
+}
+
+export interface FileTodosResult {
+  hits: TodoHitShape[];
+  /** 真正读过内容的文件数。 */
+  filesRead: number;
+  /** 超过单文件上限（200KB）被跳过的个数。 */
+  skippedLarge: number;
+  /** 命中触顶提前结束：后面的文件没看，只能说「结果不保证完整」。 */
+  stoppedAtCap: boolean;
+  /** 遍历被文件数上限截断：连「看完了」都不敢说。 */
+  walkTruncated: boolean;
 }
 
 export interface LlmKeyStatus {
@@ -831,6 +969,12 @@ export interface Skill {
   availability?: SkillAvailability;
   /** 声明的 V2 写工具（全部走审批，技能不能偷偷带上免审工具）。 */
   writeTools?: SkillWriteTool[];
+  /** 来处：builtin = 随代码发布（前端镜像同源）；file = backend/src/skills/<id>/SKILL.md。 */
+  source?: 'builtin' | 'file';
+  /** 触发场景（文件技能在 frontmatter 里声明），用于让用户看懂"什么时候该用它"。 */
+  whenToUse?: string;
+  /** 方法论正文字符数：菜单里据此提示"这是长文方法论，模型会按需加载"。 */
+  methodologyChars?: number;
 }
 
 export interface SaveFileInput {
@@ -916,6 +1060,18 @@ export interface SensitiveRule {
   id: string;
   pattern: string;
   description: string;
+}
+
+/**
+ * 保存规则的返回。
+ *
+ * `purged` 是**收紧规则时**按新规则清掉的存量索引块（跨全部资产）。
+ * 它是必填而不是可选的：0 也必须有值——「本来就没有敏感块」和
+ * 「有但没清」在界面上是两句完全不同的话，缺一个字段就分不出来。
+ */
+export interface SensitiveRuleUpdate {
+  rules: SensitiveRule[];
+  purged: { chunks: number; files: number };
 }
 
 /* ---------------- 设置 ---------------- */
@@ -1324,7 +1480,7 @@ export interface ApiClient {
   listDocuments(assetId: string): Promise<ApiEnvelope<KbDocumentList>>;
   getCredential(assetId: string): Promise<ApiEnvelope<Credential>>;
   bindCredential(assetId: string, input: CredentialBindInput): Promise<ApiEnvelope<Credential>>;
-  renewCredential(assetId: string): Promise<ApiEnvelope<Credential>>;
+  renewCredential(assetId: string, input: CredentialRenewInput): Promise<ApiEnvelope<Credential>>;
   revokeCredential(assetId: string): Promise<ApiEnvelope<Credential>>;
 
   /** 会话列表。opts.archived=true 只返回已归档（跨工作区，归档管理页用）；默认只返回活跃会话。 */
@@ -1405,6 +1561,9 @@ export interface ApiClient {
   getFileTree(assetId: string): Promise<ApiEnvelope<FileNode[]>>;
   getFileContent(assetId: string, path: string): Promise<ApiEnvelope<FileContent>>;
   getFileOutline(assetId: string, path: string): Promise<ApiEnvelope<FileOutline>>;
+  /** 符号级引用扫描：整仓、词法层（排除注释与字符串），并按 import 做跨文件收敛。 */
+  getFileRefs(assetId: string, symbol: string, max?: number): Promise<ApiEnvelope<FileRefsResult>>;
+  getFileTodos(assetId: string, subPath?: string): Promise<ApiEnvelope<FileTodosResult>>;
   getFileDiff(assetId: string, path: string): Promise<ApiEnvelope<FileDiff>>;
   getLlmKeyStatus(): Promise<ApiEnvelope<LlmKeyStatus>>;
   setLlmKey(secret: string): Promise<ApiEnvelope<LlmKeySetResult>>;
@@ -1429,7 +1588,7 @@ export interface ApiClient {
   ensureWorkspaceDir(workspaceId: string): Promise<ApiEnvelope<{ workspaceId: string; localRoot: string }>>;
 
   getSensitiveRules(): Promise<ApiEnvelope<SensitiveRule[]>>;
-  updateSensitiveRules(rules: SensitiveRule[]): Promise<ApiEnvelope<SensitiveRule[]>>;
+  updateSensitiveRules(rules: SensitiveRule[]): Promise<ApiEnvelope<SensitiveRuleUpdate>>;
 
   getSettings(): Promise<ApiEnvelope<Settings>>;
   updateSettings(section: SettingsSection, patch: Dict): Promise<ApiEnvelope<Settings>>;

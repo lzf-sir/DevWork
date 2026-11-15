@@ -100,7 +100,7 @@ export function registerBrowserRoutes(app: Express): void {
     ok(res, await writeBrowserState(String(req.params.id), normalized.url ?? '', 'user'));
   }));
 
-  /* 页面快照：前端把当前页标题与正文回传，Agent 的 browser_read_page 读它。
+  /* 页面快照：前端把当前页标题与正文回传，Agent 的 browser(mode=read) 读它。
    * 这是"Agent 能控制浏览器"的读侧 —— 只导航不看，等于盲飞。 */
   app.get('/api/conversations/:id/browser/page', wrap(async (req: Request, res: Response) => {
     ok(res, await readBrowserPage(String(req.params.id)));

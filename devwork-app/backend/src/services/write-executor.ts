@@ -18,6 +18,7 @@ import { runSqlWrite, restoreDbBackup } from './sql-write';
 import { restoreLogBackup } from './log-sink';
 import { matchTemplate, validateParams, renderCommand, handleRotateLog, handleBackupFile } from '../config/cmd-templates';
 import { writeAudit } from '../db/database';
+import { diffRegion } from './text-diff';
 import type { Identity } from '../http/core';
 
 export interface WriteOutcome {
@@ -119,10 +120,20 @@ export async function executeFileWrite(
       result: ok ? '放行' : '校验失败', severity: ok ? 'info' : 'warn',
       detail: `precheck=基线快照就绪 · bytesWritten=${buffer.length} · verify=${ok ? '通过' : '失败'} · rollbackRef=${before !== null ? '快照' : '新建无回滚'}`,
     });
+    /* 新建文件没有基线：说"快照保留、可回滚"是假话，会让用户以为能退回去。 */
+    const region = before === null ? null : diffRegion(before, content);
     return {
       ok,
       message: ok
-        ? `文件已写入：${rel}（${buffer.length} 字节）。基线快照保留在运行时数据目录（snapshots/${path.basename(snapshotDir)}/），可通过回滚端点恢复。`
+        ? [
+          before === null
+            ? `文件已新建：${rel}（${buffer.length} 字节）。这是新建文件，没有基线快照，回滚只能靠删除它。`
+            : `文件已写入：${rel}（${buffer.length} 字节）。基线快照保留在运行时数据目录（snapshots/${path.basename(snapshotDir)}/），可通过回滚端点恢复。`,
+          region && !region.unchanged ? region.block : '',
+          region && region.unchanged ? '（内容与写入前逐字节相同：这次写没有改变任何一行）' : '',
+          region && region.clipped ? region.hint : '',
+          'verify 只证明落盘内容与预期一致，不判断改动是否正确。',
+        ].filter(Boolean).join('\n')
         : `写入后校验失败：重读内容与预期不一致（罕见，检查磁盘）`,
       /* 回滚引用存**绝对路径** + 资产 id：回滚时要靠 assetId 断言目标仍在仓库根内。 */
       rollbackRef: before !== null
@@ -132,6 +143,316 @@ export async function executeFileWrite(
     };
   } catch (error) {
     return { ok: false, message: `执行失败（未落盘或部分落盘）：${error instanceof Error ? error.message : String(error)}`, diskChanged: fs.existsSync(absolute) };
+  }
+}
+
+/* ---------------- code_edit_str：精确替换 ---------------- */
+
+/**
+ * 精确替换（oldString → newString）。
+ *
+ * 为什么要有这条路径：整文件重写（code_edit）要求模型把整个文件重新吐一遍，
+ * 长文件里它一定会"顺手整理"没读到的部分——那不是用户要的改动。
+ * 精确替换把改动范围钉死在一段原文上，闸门也更硬：
+ *   · oldString 命中 0 次 → 说明模型对当前内容的认知是错的，中止；
+ *   · 命中多次且未声明 replaceAll → 位置有歧义，中止（不许猜第一个）。
+ * 两者都在**用户批准之后**的 precheck 里再判一次：审批针对意图，precheck 针对此刻的现实。
+ */
+export async function executeFileStrReplace(
+  assetId: string,
+  rel: string,
+  oldString: string,
+  newString: string,
+  replaceAll: boolean,
+  identity: Identity,
+  workspaceId: string,
+  conversationId = '',
+): Promise<WriteOutcome> {
+  const needle = String(oldString ?? '');
+  if (needle.trim() === '') {
+    return { ok: false, message: 'precheck 失败：oldString 为空（要新建文件请用 fs_write_file）', diskChanged: false };
+  }
+  if (needle.length > 200 * 1024) {
+    return { ok: false, message: 'precheck 失败：oldString 超过 200KB，这不像"局部替换"，请改用 code_edit 整文件写', diskChanged: false };
+  }
+
+  let absolute: string;
+  try {
+    absolute = await resolveRepoPath(assetId, rel);
+  } catch (error) {
+    return {
+      ok: false,
+      message: `precheck 失败（审批不豁免现实检查）：${error instanceof Error ? error.message : String(error)}`,
+      diskChanged: false,
+    };
+  }
+  if (!fs.existsSync(absolute)) {
+    return { ok: false, message: `precheck 失败：文件不存在（${rel}）。新建文件请用 fs_write_file`, diskChanged: false };
+  }
+
+  const before = fs.readFileSync(absolute, 'utf8');
+  const occurrences = before.split(needle).length - 1;
+  if (occurrences === 0) {
+    return {
+      ok: false,
+      message: `precheck 失败：oldString 在 ${rel} 中未命中（0 次）。当前文件内容与模型的理解不一致，`
+        + '已中止且磁盘零变更 —— 请先用 code_read 复核原文再重试。',
+      diskChanged: false,
+    };
+  }
+  if (occurrences > 1 && !replaceAll) {
+    return {
+      ok: false,
+      message: `precheck 失败：oldString 在 ${rel} 中命中 ${occurrences} 处，位置有歧义。`
+        + '请带上更长的上下文让它唯一命中，或明确传 replaceAll: true。磁盘零变更。',
+      diskChanged: false,
+    };
+  }
+
+  /* 快照（回滚就绪）+ 计算替换结果。
+   * 用 split/join 而不是 String.replace：后者会把 newString 里的 $& / $1
+   * 当成替换模式解释，改一次正则就变成另一段代码——这类 bug 极难发现。 */
+  const snapshotDir = snapshotDirOf(conversationId);
+  const snapshotPath = path.join(snapshotDir, `${Date.now()}-${path.basename(rel)}`);
+  try {
+    fs.mkdirSync(snapshotDir, { recursive: true });
+    fs.writeFileSync(snapshotPath, before, 'utf8');
+  } catch (error) {
+    return {
+      ok: false,
+      message: `precheck 失败：无法写基线快照，已中止（没有回滚就不动盘）：${error instanceof Error ? error.message : String(error)}`,
+      diskChanged: false,
+    };
+  }
+
+  const expected = replaceAll
+    ? before.split(needle).join(String(newString ?? ''))
+    : (() => {
+        const at = before.indexOf(needle);
+        return before.slice(0, at) + String(newString ?? '') + before.slice(at + needle.length);
+      })();
+  const firstLine = before.slice(0, before.indexOf(needle)).split('\n').length;
+
+  try {
+    const buffer = Buffer.from(expected, 'utf8');
+    fs.writeFileSync(absolute, buffer);
+    const verify = fs.readFileSync(absolute, 'utf8');
+    const ok = verify === expected;
+    await auditWrite({
+      workspaceId, actor: identity.name, action: 'write.code_edit_str', target: rel,
+      result: ok ? '放行' : '校验失败', severity: ok ? 'info' : 'warn',
+      detail: `precheck=唯一性通过(${occurrences} 处) + 快照就绪 · 首处 L${firstLine} · bytesWritten=${buffer.length} · verify=${ok ? '通过' : '失败'}`,
+    });
+    /* 落盘证据：`expected` 就是刚被 verify 确认过的磁盘内容，拿它和 `before` 比。 */
+    const region = diffRegion(before, expected);
+    return {
+      ok,
+      message: ok
+        ? [
+          `已精确替换 ${rel} 第 ${firstLine} 行起的 ${occurrences} 处（${needle.length} → ${String(newString ?? '').length} 字符）。`
+            + '基线快照已保留，可通过回滚端点恢复。',
+          region.unchanged
+            ? '（oldString 与 newString 逐字节相同：文件内容没有变化，这次写是空操作）'
+            : region.block,
+          region.clipped ? region.hint : '',
+          /* 「verify=通过」证明的只是"落盘的是我打算写的"。打算本身对不对，
+           * 工具无法判断——这句话不写，模型会把 verify 当成改动正确性的背书。 */
+          'verify 只证明落盘内容与预期一致，不判断改动是否正确。',
+        ].filter(Boolean).join('\n')
+        : '替换后校验失败：重读内容与预期不一致（罕见，检查磁盘）',
+      rollbackRef: JSON.stringify({ kind: 'file-snapshot', snapshotPath, targetPath: absolute, assetId }),
+      diskChanged: true,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `执行失败：${error instanceof Error ? error.message : String(error)}（快照可用，可回滚）`,
+      diskChanged: fs.existsSync(absolute),
+      rollbackRef: JSON.stringify({ kind: 'file-snapshot', snapshotPath, targetPath: absolute, assetId }),
+    };
+  }
+}
+
+/* ---------------- fs_manage：移动 / 复制 / 建目录 / 删除 ---------------- */
+
+/** 回收站目录：删除不是"真删"，是把文件挪出仓库。与快照同理落在 DATA_DIR，不污染用户仓库。 */
+function trashDirOf(conversationId: string): string {
+  const safe = String(conversationId || 'adhoc').replace(/[^\w-]/g, '_');
+  return path.join(DATA_DIR, 'trash', safe);
+}
+
+/** 路径是否在该资产仓库根**之内**（根本身不算：不允许对仓库根 rename/delete）。 */
+function insideRepo(assetId: string, candidate: string): boolean {
+  if (!candidate) return false;
+  try {
+    const root = path.resolve(resolveRepoRoot(assetId));
+    const target = path.resolve(candidate);
+    return target !== root && target.startsWith(`${root}${path.sep}`);
+  } catch {
+    /* 拿不到仓库根（资产已删 / 目录不存在）→ 不放行。 */
+    return false;
+  }
+}
+
+/** 路径是否在 DATA_DIR/trash 之内（回滚删除时的源）。 */
+function insideTrash(candidate: string): boolean {
+  if (!candidate) return false;
+  const root = path.resolve(DATA_DIR, 'trash');
+  return path.resolve(candidate).startsWith(`${root}${path.sep}`);
+}
+
+export type FsManageMode = 'move' | 'copy' | 'mkdir' | 'delete';
+
+/**
+ * 文件组织操作。四种 mode 都走同一条三层防线，但风险不同：
+ *   · mkdir / copy 不会丢东西（copy 目标必须不存在，不会覆盖）；
+ *   · move 会让源路径消失（回滚 = 移回去）；
+ *   · delete 最容易后悔，所以**从不真删**：移到 DATA_DIR/trash/<会话>/ 并给出回滚引用。
+ * 目标已存在一律拒绝——"覆盖"应该是显式的 write，而不是组织操作的副作用。
+ */
+export async function executeFsManage(
+  assetId: string,
+  mode: FsManageMode,
+  from: string,
+  to: string,
+  identity: Identity,
+  workspaceId: string,
+  conversationId = '',
+): Promise<WriteOutcome> {
+  const sourceRel = String(from ?? '').trim().replace(/\\/g, '/');
+  const targetRel = String(to ?? '').trim().replace(/\\/g, '/');
+
+  if (mode !== 'mkdir' && mode !== 'delete' && !sourceRel) {
+    return { ok: false, message: `precheck 失败：mode=${mode} 需要 from`, diskChanged: false };
+  }
+  if ((mode === 'move' || mode === 'copy' || mode === 'mkdir') && !targetRel) {
+    return { ok: false, message: `precheck 失败：mode=${mode} 需要 to`, diskChanged: false };
+  }
+
+  const resolveOrFail = async (rel: string): Promise<{ absolute?: string; error?: string }> => {
+    try {
+      return { absolute: await resolveRepoPath(assetId, rel) };
+    } catch (error) {
+      return { error: `precheck 失败（审批不豁免现实检查）：${error instanceof Error ? error.message : String(error)}` };
+    }
+  };
+
+  /* 两个路径都要过 resolve：只校验 from 等于允许"从仓库里搬出去"。 */
+  const source = sourceRel ? await resolveOrFail(sourceRel) : { absolute: undefined as string | undefined };
+  if (source.error) return { ok: false, message: source.error, diskChanged: false };
+  const target = targetRel ? await resolveOrFail(targetRel) : { absolute: undefined as string | undefined };
+  if (target.error) return { ok: false, message: target.error, diskChanged: false };
+
+  try {
+    /* ---- mkdir ---- */
+    if (mode === 'mkdir') {
+      const dir = target.absolute as string;
+      if (fs.existsSync(dir)) {
+        return { ok: false, message: `precheck 失败：目录已存在（${targetRel}），未做任何改动`, diskChanged: false };
+      }
+      fs.mkdirSync(dir, { recursive: true });
+      await auditWrite({
+        workspaceId, actor: identity.name, action: 'write.fs_manage · mkdir', target: targetRel,
+        result: '放行', severity: 'info', detail: 'precheck=路径边界通过 · verify=目录已存在',
+      });
+      return {
+        ok: true,
+        message: `已创建目录：${targetRel}`,
+        diskChanged: true,
+        rollbackRef: JSON.stringify({ kind: 'fs-mkdir', path: dir, assetId }),
+      };
+    }
+
+    /* ---- 源必须存在且不能是仓库根 ---- */
+    const fromPath = source.absolute as string;
+    if (!fs.existsSync(fromPath)) {
+      return { ok: false, message: `precheck 失败：源不存在（${sourceRel}）`, diskChanged: false };
+    }
+    let isDir = false;
+    try { isDir = fs.statSync(fromPath).isDirectory(); } catch { /* 保持 false */ }
+
+    /* ---- delete：移到回收站，不真删 ---- */
+    if (mode === 'delete') {
+      const trashDir = trashDirOf(conversationId);
+      fs.mkdirSync(trashDir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14);
+      const trashPath = path.join(trashDir, `${stamp}-${path.basename(fromPath)}`);
+      moveOrCopy(fromPath, trashPath, true);
+      const stillThere = fs.existsSync(fromPath);
+      if (stillThere) {
+        return { ok: false, message: `执行失败：${sourceRel} 仍存在于原位置（未完成移除）`, diskChanged: false };
+      }
+      await auditWrite({
+        workspaceId, actor: identity.name, action: 'write.fs_manage · delete', target: sourceRel,
+        result: '放行', severity: 'warn',
+        detail: `precheck=路径边界通过 · 目标=回收站（非真删） · trash=${trashPath} · verify=源已消失`,
+      });
+      return {
+        ok: true,
+        message: `已移出仓库（可回滚）：${sourceRel}${isDir ? '（整个目录）' : ''} → 回收站`,
+        diskChanged: true,
+        rollbackRef: JSON.stringify({ kind: 'fs-trash', trashPath, original: fromPath, assetId }),
+      };
+    }
+
+    /* ---- move / copy：目标必须不存在 ---- */
+    const toPath = target.absolute as string;
+    if (fs.existsSync(toPath)) {
+      return { ok: false, message: `precheck 失败：目标已存在（${targetRel}），不覆盖（要覆盖请用 fs_write_file 显式写）`, diskChanged: false };
+    }
+    if (mode === 'copy' && isDir) {
+      return { ok: false, message: 'precheck 失败：copy 只支持单个文件（目录请用 move，或逐个文件复制）', diskChanged: false };
+    }
+    fs.mkdirSync(path.dirname(toPath), { recursive: true });
+    moveOrCopy(fromPath, toPath, mode === 'move');
+
+    /* 校验：目标存在、源状态符合预期。 */
+    const targetExists = fs.existsSync(toPath);
+    const sourceGone = mode === 'move' ? !fs.existsSync(fromPath) : fs.existsSync(fromPath);
+    if (!targetExists || !sourceGone) {
+      return {
+        ok: false,
+        message: `执行失败：${mode === 'move' ? '移动' : '复制'}后状态不符（目标${targetExists ? '存在' : '缺失'} / 源${sourceGone ? '符合预期' : '异常'}）`,
+        diskChanged: targetExists,
+      };
+    }
+    await auditWrite({
+      workspaceId, actor: identity.name, action: `write.fs_manage · ${mode}`, target: `${sourceRel} → ${targetRel}`,
+      result: '放行', severity: 'info',
+      detail: `precheck=双路径边界通过 · 目标原不存在 · verify=通过`,
+    });
+    return {
+      ok: true,
+      message: mode === 'move' ? `已移动：${sourceRel} → ${targetRel}` : `已复制：${sourceRel} → ${targetRel}`,
+      diskChanged: true,
+      rollbackRef: JSON.stringify(
+        mode === 'move'
+          ? { kind: 'fs-move', from: fromPath, to: toPath, assetId }
+          : { kind: 'fs-copy', path: toPath, assetId },
+      ),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `执行失败：${error instanceof Error ? error.message : String(error)}`,
+      diskChanged: false,
+    };
+  }
+}
+
+/** 跨盘 rename 会 EXDEV，所以移动要能退化成"复制再删"。 */
+function moveOrCopy(from: string, to: string, move: boolean): void {
+  if (!move) {
+    fs.copyFileSync(from, to);
+    return;
+  }
+  try {
+    fs.renameSync(from, to);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EXDEV') throw error;
+    fs.cpSync(from, to, { recursive: true });
+    fs.rmSync(from, { recursive: true, force: true });
   }
 }
 
@@ -326,6 +647,76 @@ export async function rollbackWritePlan(
         result: '放行', severity: 'info', detail: '文件已恢复到写入前快照',
       });
       return { ok: true, message: `文件已恢复到写入前快照：${path.basename(targetPath)}` };
+    }
+    /* ---- fs_manage 的四种回滚 ----
+     * 与 file-snapshot 同一个前提：rollbackRef 由服务端生成，但路径必须重新校验。
+     * 这里多一类边界：回收站位于 DATA_DIR（不在仓库内），fs-trash 的回滚源在那里，
+     * 其余三种的目标必须在仓库内。 */
+    case 'fs-mkdir': {
+      const dir = String(ref.path ?? '');
+      const assetId = String(ref.assetId ?? '');
+      if (!insideRepo(assetId, dir)) {
+        return { ok: false, message: 'E_PATH_ESCAPE：目录不在该资产仓库根内，已拒绝' };
+      }
+      if (!fs.existsSync(dir)) return { ok: true, message: '目录已不存在（无需回滚）' };
+      /* 只删空目录：用户/Agent 后来放进来的文件不该被回滚顺手删掉。 */
+      if (fs.readdirSync(dir).length > 0) {
+        return { ok: false, message: '目录非空，未删除（回滚只撤销"创建空目录"这一步）' };
+      }
+      fs.rmdirSync(dir);
+      await auditWrite({
+        workspaceId, actor: identity.name, action: 'write.rollback · fs-mkdir', target: dir,
+        result: '放行', severity: 'info', detail: '空目录已移除',
+      });
+      return { ok: true, message: '空目录已移除' };
+    }
+    case 'fs-move': {
+      const from = String(ref.from ?? '');
+      const to = String(ref.to ?? '');
+      const assetId = String(ref.assetId ?? '');
+      if (!insideRepo(assetId, from) || !insideRepo(assetId, to)) {
+        return { ok: false, message: 'E_PATH_ESCAPE：回滚路径不在该资产仓库根内，已拒绝' };
+      }
+      if (!fs.existsSync(to)) return { ok: false, message: '移动目标已不存在，无法移回' };
+      if (fs.existsSync(from)) return { ok: false, message: `原路径已被占用（${path.basename(from)}），未覆盖` };
+      fs.mkdirSync(path.dirname(from), { recursive: true });
+      moveOrCopy(to, from, true);
+      await auditWrite({
+        workspaceId, actor: identity.name, action: 'write.rollback · fs-move', target: `${to} → ${from}`,
+        result: '放行', severity: 'info', detail: '文件已移回原路径',
+      });
+      return { ok: true, message: '文件已移回原路径' };
+    }
+    case 'fs-copy': {
+      const target = String(ref.path ?? '');
+      const assetId = String(ref.assetId ?? '');
+      if (!insideRepo(assetId, target)) {
+        return { ok: false, message: 'E_PATH_ESCAPE：回滚路径不在该资产仓库根内，已拒绝' };
+      }
+      if (!fs.existsSync(target)) return { ok: true, message: '复制出来的文件已不存在（无需回滚）' };
+      fs.rmSync(target, { force: true });
+      await auditWrite({
+        workspaceId, actor: identity.name, action: 'write.rollback · fs-copy', target,
+        result: '放行', severity: 'info', detail: '复制产物已删除（源文件未受影响）',
+      });
+      return { ok: true, message: '复制产物已删除' };
+    }
+    case 'fs-trash': {
+      const trashPath = String(ref.trashPath ?? '');
+      const original = String(ref.original ?? '');
+      const assetId = String(ref.assetId ?? '');
+      if (!insideTrash(trashPath) || !insideRepo(assetId, original)) {
+        return { ok: false, message: 'E_PATH_ESCAPE：回收站或目标路径越界，已拒绝' };
+      }
+      if (!fs.existsSync(trashPath)) return { ok: false, message: '回收站里的副本已不存在，无法恢复' };
+      if (fs.existsSync(original)) return { ok: false, message: `原路径已被占用（${path.basename(original)}），未覆盖` };
+      fs.mkdirSync(path.dirname(original), { recursive: true });
+      moveOrCopy(trashPath, original, true);
+      await auditWrite({
+        workspaceId, actor: identity.name, action: 'write.rollback · fs-trash', target: `${trashPath} → ${original}`,
+        result: '放行', severity: 'info', detail: '删除已撤销，文件回到原路径',
+      });
+      return { ok: true, message: '删除已撤销，文件回到原路径' };
     }
     case 'native-command': {
       const command = String(ref.command ?? '');

@@ -11,7 +11,7 @@ import { AUDIT_GLOBAL_SCOPE, get, run, writeAudit } from '../db/database';
 import { credentialShape } from '../db/repositories';
 import { resolveWorkspaceIdForAsset } from './workspace-repos';
 import { check, kernelIdentity } from '../kernel/permission';
-import { loadSecret, storeSecret } from './secret-store';
+import { deleteSecret, loadSecret, storeSecret } from './secret-store';
 
 export type CredentialState = 'unbound' | 'active' | 'expiring' | 'expired' | 'revoked';
 
@@ -119,13 +119,43 @@ export async function credentialSecret(assetId: string): Promise<string | null> 
   return loadSecret(`vault/${assetId}`);
 }
 
-export function renew(assetId: string, identity: Identity): Record<string, unknown> {
-  setState(assetId, 'active', `${assetId} · 只读凭据（已轮换）`, identity);
-  return credentialShape(assetId);
+/**
+ * 轮换：换掉秘密本身，不只是改个标签。
+ *
+ * 原来这里只把 label 改成「已轮换」并置回 active —— 状态变了、密文没变。
+ * 界面上写着「新版本密文已写入本机钥匙串」，钥匙串里还是旧的那把。
+ * 轮换必须带新秘密，否则它就不是轮换，是「假装轮换过」。
+ */
+export async function renew(
+  assetId: string,
+  identity: Identity,
+  input: { secret?: string; label?: string; authMethod?: string; username?: string } = {},
+): Promise<Record<string, unknown>> {
+  const secret = typeof input.secret === 'string' ? input.secret : '';
+  if (secret.trim() === '') {
+    throw new ApiFailure('E_VALIDATION', '轮换必须提供新的凭据值：只改标签而不换秘密，等于没有轮换。');
+  }
+  const current = credentialShape(assetId);
+  /* 秘密不做 trim：口令首尾空格是有意义的字符。 */
+  const { mode } = await storeSecret(`vault/${assetId}`, secret);
+  setState(assetId, 'active', String(input.label ?? current.label ?? '').trim() || `${assetId} · 只读凭据`, identity, mode, {
+    authMethod: input.authMethod ?? String(current.authMethod ?? ''),
+    username: input.username ?? String(current.username ?? ''),
+  });
+  run('UPDATE asset SET credential_bound = 1 WHERE id = ?', assetId);
+  return { ...credentialShape(assetId), secretMode: mode };
 }
 
-export function revoke(assetId: string, identity: Identity): Record<string, unknown> {
+/**
+ * 吊销：作废 + 抹掉本机密文。
+ *
+ * 只改状态不删密文，等于「账号注销了但密码还抄在便签上」：`credentialSecret`
+ * 确实会按状态拒绝返回，可密文仍留在磁盘上，任何直接读存储的路径都能拿到。
+ * 吊销是用户对「这个秘密不该再存在」的明确表达，实现必须做到这一步。
+ */
+export async function revoke(assetId: string, identity: Identity): Promise<Record<string, unknown>> {
+  const removed = await deleteSecret(`vault/${assetId}`);
   setState(assetId, 'revoked', '', identity);
   run('UPDATE asset SET credential_bound = 0 WHERE id = ?', assetId);
-  return credentialShape(assetId);
+  return { ...credentialShape(assetId), secretRemoved: removed };
 }

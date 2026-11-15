@@ -34,7 +34,7 @@ export type AgentEvent =
   | {
       type: 'tool_call';
       toolName: string;
-      /** 卡片展示名（可写「kb_search + code_search」这类组合说明）。 */
+      /** 卡片展示名（可写「kb_search + code_find」这类组合说明）。 */
       label?: string;
       args: string;
       durationMs: number;
@@ -203,9 +203,9 @@ const TEMPLATES: Record<string, Template> = {
         write: false,
       },
       {
-        toolName: 'code_search',
-        label: 'code_search',
-        args: '{"query":"setConnectTimeout"}',
+        toolName: 'code_find',
+        label: 'code_find',
+        args: '{"mode":"index","pattern":"setConnectTimeout"}',
         risk: 'low',
         write: false,
       },
@@ -227,9 +227,9 @@ const TEMPLATES: Record<string, Template> = {
     text: '已定位 InventoryClient 的连接超时配置，正在核对上下文。',
     tools: [
       {
-        toolName: 'code_search',
-        label: 'code_search',
-        args: '{"query":"setConnectTimeout"}',
+        toolName: 'code_find',
+        label: 'code_find',
+        args: '{"mode":"index","pattern":"setConnectTimeout"}',
         risk: 'low',
         write: false,
       },
@@ -258,9 +258,9 @@ const TEMPLATES: Record<string, Template> = {
         write: false,
       },
       {
-        toolName: 'code_search',
-        label: 'code_search',
-        args: '{"query":"{{content}}"}',
+        toolName: 'code_find',
+        label: 'code_find',
+        args: '{"mode":"index","pattern":"{{content}}"}',
         risk: 'low',
         write: false,
       },
@@ -518,15 +518,50 @@ export class OpenAiCompatibleGateway implements LlmGateway {
     const toolNames = (ctx.toolFace ?? []).map((tool) => tool.function.name);
     return [
       '你是 DevWork 的运维/研发分析 Agent。工具面由所在工作区的资产派生：',
-      `- 可用工具：${toolNames.length > 0 ? toolNames.join(' / ') : 'pg_sql_query / kb_search / code_search'}；`,
-      '- 只读工具直接调用；写工具（code_edit / db_query_write / srv_exec / fs_write_file）表达意图即可，',
+      `- 可用工具：${toolNames.length > 0 ? toolNames.join(' / ') : 'pg_sql_query / kb_search / code_find'}；`,
+      '- 只读工具直接调用；写工具（code_edit / fs_manage / db_query_write / srv_exec / fs_write_file）表达意图即可，',
       '  它们会生成审批卡，由用户批准后按 precheck→执行→校验→回滚 管线真执行，你不要虚构执行结果；',
+      /* 写后的证据口径：工具已经给了改动片段，模型就不该再"凭记忆复述改了什么"；
+       * 而 verify=通过 只证明落盘一致，把它当"改对了"是这套工具最贵的误读。 */
+      '- 写工具返回的「改动片段」是可以当证据的改动描述，直接引它；片段以外的行就是没看到，不要顺手描述。',
+      '  返回里 verify=通过 只表示落盘内容与预期一致，不表示改动正确——改对没改对要靠重放调用点',
+      '  （code_find mode=refs 的前后对比）与 code_view(mode=outline) 看结构有没有被改坏；',
+      '  返回「空操作」说明磁盘没有变化，不要说"已修改"；返回「新建文件，没有基线快照」时不要说能一键回滚；',
       '- 服务器运维操作只能用 srv_exec 表达意图（action 参数），模板库不支持的操作要明说不支持；',
-      /* 长任务的两条纪律：先拆步、每步落地后回报。没有这条，10 步之后模型就忘了原始目标，
-       * 而用户看到的只是一堆工具行，不知道现在做到哪了。 */
+      /* 合并工具的纪律：mode 是必填项。没有这条，模型会少传 mode 然后拿到一条报错，
+       * 或者更糟——按默认值猜一个，于是"想找文件却搜了内容"。
+       * 三个判据的语义差异（索引 / 磁盘正则 / 按名找文件 / 符号引用）必须点明，
+       * 否则它会一直用最熟悉的那一个。 */
+      '- 工具带 mode 时必须显式传：code_find 的 regex/glob/index/refs、code_view 的 content/outline/diff/status、',
+      '  db_inspect 的 tables/schema/counts/explain、browser 的 navigate/read、skill 的 list/load、',
+      '  code_edit 的 replace/rewrite、fs_manage 的 move/copy/mkdir/delete；',
+      '- 找代码的顺序：先 code_find(mode=glob) 收敛范围 → 再 code_find(mode=regex 或 refs) 定位到行 →',
+      '  最后 code_view(mode=content) 带 offset/limit 读上下文；',
+      '  code_view 返回里写着「还有 N 行未读」时，不许对这个文件下整体结论——继续读，或明说只看过哪一段；',
+      '  问"这次改了哪些文件"用 code_view(mode=status)（不用猜文件名）；单文件改动细节才用 mode=diff；',
+      '  mode=diff 说「未追踪」时不是「没改」：新文件在 diff 里看不到内容，要改用 mode=content 读；',
+      '  mode=diff 开头写着「共 N 个 hunk、本次展示多少」时同理：没展开的 hunk 也等于没看，',
+      '  别把它当成「没改」——用 mode=content 按 @@ 行号补读，或者明说结论只覆盖了哪几段；',
+      '  code_find(mode=index) 是索引检索，快但可能滞后于工作区：引用行号前用 mode=regex 或 code_view 复核；',
+      '  查"这块代码为什么长这样"用 git_history（log/blame/show），它是唯一的历史证据来源；',
+      /* 搜索与抓取的分工：搜索给候选，抓取给原文。混起来用就会拿摘要当原文引用。 */
+      '- 需要外部资料：不知道去哪找时先 web_search 收敛候选，再 web_fetch 打开具体页面取原文；',
+      '  只有 url 已知就直接 web_fetch。web_search 的摘要是二次加工，引用必须落到原文；',
+      '  抓不到就如实说抓不到，不要用记忆里的内容代替页面内容；',
+      /* 子代理：什么时候值得用、结论怎么用。不写清就会变成"什么活都丢给子代理"。 */
+      '- 需要翻很多文件但结论很短时，用 subtask 派只读子代理（goal 必须自包含；它有调用次数上限）；',
+      '  子代理的结论不是"你读到的"：关键结论要用 code_view 复核原文再写进最终回答；',
+      '  简单问题不要开子代理——一次 code_find 就够的事，开子代理只是多一层延迟；',
+      /* 技能两段式：清单轻、正文重。写清"先看后载"才不会有模型在轮次一开始就把所有正文拉进来。 */
+      '- 遇到不熟悉的任务类型，先 skill(mode=list) 看有没有对应技能，再用 skill(mode=load, id=...) 取方法论并按其步骤执行；',
+      '  一次只加载一个技能，加载了就要真的用（不要只在回复里提一句它的名字）；',
+      /* 长任务的三条纪律：先拆步、事实落笔记、每步落地后回报。没有这条，10 步之后模型就忘了原始目标，
+       * 而用户看到的只是一堆工具行，不知道现在做到哪了。上下文一压缩，"已经查过什么"最先消失。 */
       '- 长任务（预计超过 3 个动作）先调用 todo_write 拆成 3~7 步，再逐步执行；',
       '  每完成一步立刻调用 todo_write 回传完整清单并把该步标 done；卡住就标 blocked 并写 note，',
       '  不要为了"看起来完成"把没做的步骤标 done，也不要在一次调用里把所有步骤一次性标完成；',
+      '- 查证得到的关键事实（不是进度）用 memo(mode=write) 记一条，例如"超时根因：索引缺失，EXPLAIN 已证实"；',
+      '  上下文被压缩过之后，先 memo(mode=read) 取回再决定要不要重查——不要把已经查清的事再查一遍；',
       '- 结论必须给出置信度，引用检索到的证据时用 [1][2] 角标标注；',
       '- 检索结果为空时直接说"没有找到"，不要编造文件路径或行号。',
       `- 当前只读模式：${ctx.readOnlyMode ? '开启' : '关闭'}；挂载资产：${ctx.assetIds.join(', ') || '默认（生产库+运营知识库)'}。`,
@@ -564,14 +599,19 @@ export class OpenAiCompatibleGateway implements LlmGateway {
         },
       },
       {
+        /* 静态兜底也要用正式名：没有派生面时模型仍会拿它去调，
+         * 给旧名等于让"工具面为空"这条路径永远测不到归一逻辑。 */
         type: 'function',
         function: {
-          name: 'code_search',
-          description: '在代码库 order-service 索引中检索代码片段。',
+          name: 'code_find',
+          description: '定位代码：mode=index 走索引检索，mode=regex 在磁盘上按正则精确定位（带行号）。',
           parameters: {
             type: 'object',
-            properties: { query: { type: 'string' } },
-            required: ['query'],
+            properties: {
+              mode: { type: 'string', enum: ['index', 'regex'], description: 'index=索引检索；regex=磁盘正则' },
+              pattern: { type: 'string', description: '检索关键词或正则' },
+            },
+            required: ['mode', 'pattern'],
           },
         },
       },
@@ -793,7 +833,7 @@ export class OpenAiCompatibleGateway implements LlmGateway {
         );
       }
 
-      /* 引用事件：来自真实 kb_search/code_search 命中，与结论 [n] 角标顺序对应。 */
+      /* 引用事件：来自真实 kb_search / code_find 命中，与结论 [n] 角标顺序对应。 */
       const cited = citations.slice(0, 4);
       const citeIds = cited.map((_cit, index) => `cit-${ctx.conversationId}-${index + 1}`);
       for (let index = 0; index < cited.length; index += 1) {

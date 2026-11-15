@@ -849,6 +849,30 @@ code{font-family:var(--mono);font-size:12.5px;background:var(--gray-50);
   font-size:12.5px;color:var(--gray-600);line-height:1.7}
 .dwr-cred .btn{margin-top:8px}
 
+/* 凭据区块：五态徽标 + 键值行 + 动作。徽标色按状态给，
+ * 「已吊销」与「未绑定」在库里都是未绑定，但含义完全不同，配色必须能分开。 */
+.cred{display:flex;flex-direction:column;gap:7px}
+.cred-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.cred-badge{font-size:10.5px;font-weight:600;padding:1px 7px;border-radius:999px;
+  border:1px solid var(--gray-200);background:var(--gray-25);color:var(--gray-500)}
+.cred-badge.ok{color:var(--success);border-color:var(--success-line);background:var(--success-bg)}
+.cred-badge.warn{color:var(--warning);border-color:var(--warning-line);background:var(--warning-bg)}
+.cred-badge.bad{color:var(--danger);border-color:var(--danger);background:var(--danger-bg)}
+.cred-label{font-family:var(--mono);font-size:11.5px;color:var(--gray-700);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.cred-kv{display:flex;flex-direction:column;gap:2px}
+.cred-kv>div{display:flex;gap:8px}
+.cred-k{flex:0 0 62px;color:var(--gray-400);font-size:11.5px}
+.cred-v{flex:1 1 auto;min-width:0;color:var(--gray-700);font-size:11.5px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cred-hint{font-size:11px;line-height:1.6;color:var(--gray-500)}
+.cred-hint.warn{color:var(--warning)}
+.cred-hint.bad{color:var(--danger)}
+.cred-actions{display:flex;gap:6px;flex-wrap:wrap}
+.cred-actions .btn{margin-top:0}
+.cred-line{font-size:11.5px;color:var(--gray-400)}
+.cred-err{font-size:11.5px;color:var(--danger)}
+
 /* 终端 */
 .term{flex:1;background:#15181D;color:#D7DCE4;font-family:var(--mono);font-size:12.5px;
   line-height:1.75;padding:12px 14px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;
@@ -940,9 +964,88 @@ table.g td.cellcp:hover{box-shadow:inset 0 0 0 1px var(--accent-line);color:var(
   padding:10px 12px}
 .rinfo .rt{font-size:11px;color:var(--gray-400);margin-bottom:6px;font-weight:500;letter-spacing:.03em}
 .sym{font-size:12px;color:var(--gray-600);padding:3px 0;display:flex;gap:6px;cursor:pointer;
+  /* 引用一栏会出现整条仓库相对路径：212px 侧栏放不下，必须允许在任意处断行，
+     否则长路径会直接顶出面板边界、被窗口裁掉半截。 */
+  overflow-wrap:anywhere;
   transition:color var(--t)}
 .sym:hover{color:var(--accent)}
 .sym .sg{color:var(--accent);font-family:var(--mono);font-size:10.5px}
+/* 符号行的「引」入口：常显但低调——藏起来就没人会点，显眼又会抢大纲本身的注意力 */
+.sym .refsbtn{margin-left:auto;flex:0 0 auto;font-size:10px;line-height:1;padding:2px 4px;
+  border-radius:var(--r-xs);border:1px solid transparent;color:var(--gray-400);
+  font-family:var(--mono);transition:color var(--t),border-color var(--t),background var(--t)}
+.sym .refsbtn:hover{color:var(--accent);border-color:var(--accent-line);background:var(--accent-weak)}
+.sym .ln{margin-left:auto;color:var(--gray-400);font-size:10.5px;flex:0 0 auto}
+.sym .refsbtn+.ln{margin-left:6px}
+
+/* 符号引用面板（编辑器底部）：内容是表格式证据，不能用弹窗——要能边看边跳 */
+.rp{flex:0 0 auto;max-height:48%;min-height:0;display:flex;flex-direction:column;
+  border-top:1px solid var(--gray-200);background:var(--gray-25)}
+.rp-head{height:30px;flex:0 0 30px;display:flex;align-items:center;gap:8px;padding:0 12px;
+  border-bottom:1px solid var(--gray-100);font-size:12px;color:var(--gray-600);
+  background:var(--gray-25)}
+.rp-head .nm{font-family:var(--mono);font-size:11.5px;color:var(--accent);font-weight:600}
+.rp-head .sp{margin-left:auto;display:flex;gap:6px;align-items:center}
+.rp-head .x{border:none;background:transparent;color:var(--gray-400);cursor:pointer;
+  padding:2px;display:grid;place-items:center;border-radius:var(--r-xs)}
+.rp-head .x:hover{color:var(--danger);background:var(--danger-bg)}
+/* 面板过期后的重扫入口：和关闭按钮并排，但用文字而不是图标——它是一个有代价的动作。 */
+.rp-head .rp-re{border:1px solid var(--warning-line);background:var(--warning-bg);color:var(--warning);
+  font-size:11px;line-height:1.6;padding:0 6px;border-radius:var(--r-xs);cursor:pointer}
+.rp-head .rp-re:hover{background:var(--warning);color:var(--gray-0)}
+.rp-body{overflow:auto;padding:6px 12px 10px;font-size:12px;color:var(--gray-600);line-height:1.65}
+.rp-lead{color:var(--gray-700);font-variant-numeric:tabular-nums}
+.rp-sec{font-size:10.5px;color:var(--gray-400);letter-spacing:.04em;margin:9px 0 3px;font-weight:500}
+.rp-row{display:flex;align-items:baseline;gap:8px;padding:2px 6px;border-radius:var(--r-xs);
+  cursor:pointer;transition:background var(--t),color var(--t)}
+.rp-row:hover{background:var(--gray-100);color:var(--accent)}
+.rp-row .p{font-family:var(--mono);font-size:11.5px;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;flex:0 1 auto;min-width:0}
+.rp-row .why{color:var(--gray-500);font-size:11px;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;flex:1 1 0;min-width:0}
+.rp-row .n{flex:0 0 auto;font-size:11px;color:var(--gray-500);font-variant-numeric:tabular-nums}
+.rp-tag{flex:0 0 auto;font-size:10px;line-height:1.5;padding:0 5px;border-radius:var(--r-xs);
+  border:1px solid var(--gray-200);background:var(--gray-0);color:var(--gray-500)}
+.rp-tag.ok{color:var(--success);border-color:var(--success-line);background:var(--success-bg)}
+.rp-tag.warn{color:var(--warning);border-color:var(--warning-line);background:var(--warning-bg)}
+.rp-tag.bad{color:var(--danger);border-color:var(--danger-line);background:var(--danger-bg)}
+.rp-note{color:var(--gray-400);font-size:11px;margin-top:5px}
+/* 归属（在 Xxx.method 里）：一行里最后一段，不能被 .why 的 ellipsis 挤没。 */
+.rp-who{flex:0 0 auto;font-size:11px;color:var(--gray-400);white-space:nowrap}
+.rp-warn{color:var(--warning);font-size:11px;margin-top:5px}
+.rp-err{color:var(--danger);font-size:12px}
+.rp-groups{display:flex;flex-wrap:wrap;gap:4px 10px;font-size:11.5px;color:var(--gray-500)}
+.rp-groups b{font-weight:600;color:var(--gray-700);font-variant-numeric:tabular-nums}
+
+/* 全库检索：复用 .rp 的骨架（同一片底部空间），只换行内结构。
+   与文件内 ⌘F 的区分靠抬头文案与「索引快照」提示，不靠颜色——颜色不承载语义。 */
+.rs .rp-body{padding-top:8px}
+.rs-input{width:100%;box-sizing:border-box;background:var(--gray-0);border:1px solid var(--gray-200);
+  border-radius:var(--r-sm);color:var(--gray-900);padding:5px 9px;outline:none;font-size:12px;
+  font-family:inherit;transition:border-color var(--t),box-shadow var(--t)}
+.rs-input:focus{border-color:var(--accent-line);box-shadow:0 0 0 2px var(--accent-weak)}
+.rs-input::placeholder{color:var(--gray-400)}
+.rs-row{align-items:baseline;gap:10px;padding:3px 6px;flex-wrap:nowrap}
+.rs-loc{flex:0 0 auto;max-width:38%;display:inline-flex;align-items:baseline;gap:0;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rs-loc .p{font-family:var(--mono);font-size:11.5px;color:var(--gray-700)}
+.rs-row:hover .rs-loc .p{color:var(--accent)}
+.rs-loc .n{font-family:var(--mono);font-size:11px;color:var(--gray-400);font-variant-numeric:tabular-nums}
+.rs-snip{flex:1 1 0;min-width:0;font-family:var(--mono);font-size:11px;color:var(--gray-500);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rs-snip mark{background:var(--accent-weak);color:var(--accent);border-radius:2px;padding:0 1px}
+.rs .rp-re-inline{margin-top:6px;border:1px solid var(--gray-200);background:var(--gray-0);
+  color:var(--gray-600);font-size:11.5px;padding:2px 8px;border-radius:var(--r-xs);cursor:pointer;
+  transition:border-color var(--t),color var(--t),background var(--t)}
+.rs .rp-re-inline:hover{border-color:var(--accent-line);color:var(--accent);background:var(--accent-weak)}
+.rs .rp-re-inline:disabled{opacity:.6;cursor:default}
+/* 文件树顶部的检索入口：常显但低存在感，像一条「搜这里」的占位输入 */
+.fsearch{display:flex;align-items:center;gap:6px;margin:8px 8px 4px;padding:5px 9px;
+  border:1px solid var(--gray-200);border-radius:var(--r-sm);background:var(--gray-0);
+  color:var(--gray-400);font-size:11.5px;cursor:pointer;font-family:inherit;
+  transition:border-color var(--t),color var(--t),background var(--t)}
+.fsearch:hover{border-color:var(--accent-line);color:var(--accent);background:var(--accent-weak)}
+.fsearch .k{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--gray-400)}
 
 /* ===== 项目概览 ===== */
 .pjg{padding:20px 24px;overflow-y:auto;flex:1}
@@ -1079,6 +1182,38 @@ table.g td.cellcp:hover{box-shadow:inset 0 0 0 1px var(--accent-line);color:var(
 /* 模型档案表单弹窗：复用全局弹窗骨架，但层级更高、表单更宽 */
 .ovl.ovl-form{z-index:145}
 .modal.modal-form{width:520px}
+
+/* 敏感规则编辑器：比普通弹窗宽（一行要放下 pattern + 说明 + 删除），
+ * 但仍然是弹窗而不是面板——它是一次性的边界调整，不需要常驻在工作区。 */
+.modal.modal-rules{width:620px}
+.sre{display:flex;flex-direction:column;gap:10px}
+.sre-note{font-size:11.5px;line-height:1.65;color:var(--gray-500);background:var(--gray-25);
+  border:1px solid var(--gray-200);border-radius:var(--r-sm);padding:8px 10px}
+.sre-note b{color:var(--gray-700);font-weight:600}
+.sre-list{display:flex;flex-direction:column;gap:5px;max-height:min(46vh,360px);overflow:auto;
+  padding-right:2px}
+.sre-row{display:flex;align-items:flex-start;gap:8px;padding:2px 0}
+.sre-idx{flex:0 0 20px;font-family:var(--mono);font-size:10.5px;color:var(--gray-400);
+  text-align:right;padding-top:6px}
+.sre-main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px}
+.sre .sre-input{margin-bottom:0;font-family:var(--mono);font-size:12px}
+.sre-row.bad .sre-input{border-color:var(--danger)}
+.sre-hint{font-size:10.5px;color:var(--gray-400);padding-left:1px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sre-hint.bad{color:var(--danger)}
+.sre-del{flex:0 0 auto;margin-top:3px;border:1px solid var(--gray-200);background:var(--gray-0);
+  color:var(--gray-500);border-radius:var(--r-sm);font-size:11px;padding:4px 8px;cursor:pointer;
+  transition:border-color var(--t),color var(--t),background var(--t)}
+.sre-del:hover{border-color:var(--danger);color:var(--danger);background:var(--danger-bg)}
+.sre-add{display:flex;gap:8px;align-items:center}
+.sre-add .sre-input{flex:1 1 auto}
+.sre-empty{font-size:12px;color:var(--gray-400);padding:10px 0}
+.sre-err{font-size:11.5px;color:var(--danger);background:var(--danger-bg);
+  border-radius:var(--r-sm);padding:7px 10px}
+.sre-warn{font-size:11.5px;color:var(--warning);background:var(--warning-bg);
+  border:1px solid var(--warning-line);border-radius:var(--r-sm);padding:7px 10px}
+.sre-foot{margin-top:2px;align-items:center}
+.sre-count{margin-right:auto;font-size:11px;color:var(--gray-400);font-family:var(--mono)}
 .mform{display:flex;flex-direction:column;gap:11px;margin-bottom:12px}
 .mform .minput{margin-bottom:0}
 .mform .sel{width:100%;min-width:0}
